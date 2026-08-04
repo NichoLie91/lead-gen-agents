@@ -42,7 +42,8 @@ SLUG_ALIASES: dict[str, list[str]] = {
     "sheet_values_update": ["GOOGLESHEETS_BATCH_UPDATE"],
     "sheet_get_info": ["GOOGLESHEETS_GET_SPREADSHEET_INFO", "GOOGLESHEETS_GET_SHEET_NAMES"],
     "sheet_read": ["GOOGLESHEETS_BATCH_GET"],
-    "maps_search": ["SERPAPI_GOOGLE_MAPS_SEARCH", "ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH"],
+    "maps_search": ["GOOGLE_MAPS_TEXT_SEARCH", "SERPAPI_GOOGLE_MAPS_SEARCH",
+                     "ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH"],
     "web_search": ["TAVILY_TAVILY_SEARCH", "SERPER_GOOGLE_SEARCH"],
     "fetch_url": ["COMPOSIO_SEARCH_FETCH_URL_CONTENT"],
     "ig_send_dm": ["INSTAGRAM_SEND_TEXT_MESSAGE"],
@@ -54,7 +55,7 @@ SLUG_ALIASES: dict[str, list[str]] = {
 # Toolkits whose catalogs we resolve slugs against (per-toolkit fetches return
 # the full tool set reliably; a single unfiltered fetch is capped).
 RESOLVE_TOOLKITS = (
-    "gmail", "googlesheets", "instagram", "github", "serpapi", "zenserp", "tavily",
+    "gmail", "googlesheets", "instagram", "github", "google_maps", "serpapi", "zenserp", "tavily",
 )
 
 # Map an action slug prefix to the Composio toolkit that owns it (v3 executes
@@ -64,13 +65,14 @@ TOOLKIT_BY_PREFIX: tuple[tuple[str, str], ...] = (
     ("GOOGLESHEETS_", "googlesheets"),
     ("INSTAGRAM", "instagram"),
     ("GITHUB_", "github"),
+    ("GOOGLE_MAPS_", "google_maps"),
     ("SERPAPI_", "serpapi"),
     ("ZENSERP_", "zenserp"),
     ("TAVILY_", "tavily"),
 )
 
 REQUIRED_CONNECTIONS = ("googlesheets", "gmail")
-OPTIONAL_CONNECTIONS = ("instagram", "github", "serpapi", "zenserp", "tavily")
+OPTIONAL_CONNECTIONS = ("instagram", "github", "google_maps", "serpapi", "zenserp", "tavily")
 
 
 class ComposioNotConfigured(Exception):
@@ -225,9 +227,17 @@ class ComposioAgent:
 
     # ---------- higher-level tools ----------
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:
-        resp = await self.execute_action(
-            self.slug("maps_search"), {"q": query}
-        )
+        # The resolved action differs in its query param name: Google Places
+        # (GOOGLE_MAPS_TEXT_SEARCH) uses ``textQuery``; SerpAPI/ZenSerp use ``q``.
+        slug = self.slug("maps_search")
+        if "GOOGLE_MAPS" in slug.upper():
+            params = {"textQuery": query, "maxResultCount": 20,
+                      "fieldMask": "places.id,places.displayName,places.formattedAddress,"
+                                    "places.nationalPhoneNumber,places.websiteUri,"
+                                    "places.rating,places.userRatingCount,places.businessStatus"}
+        else:
+            params = {"q": query}
+        resp = await self.execute_action(slug, params)
         if not resp.get("ok"):
             return []
         return self._normalize_maps(resp.get("data", {}))
@@ -238,7 +248,8 @@ class ComposioAgent:
             raw = (data.get("local_results") or data.get("results")
                    or data.get("places") or data.get("response_data"))
             if isinstance(raw, dict):
-                raw = raw.get("local_results") or raw.get("results")
+                raw = (raw.get("local_results") or raw.get("results")
+                       or raw.get("places"))
         else:
             raw = data
         if not isinstance(raw, list):
@@ -247,14 +258,19 @@ class ComposioAgent:
         for item in raw:
             if not isinstance(item, dict):
                 continue
+            display = item.get("displayName") or {}
             out.append({
-                "name": item.get("title") or item.get("name", ""),
-                "address": item.get("formatted_address") or item.get("address", ""),
-                "phone": item.get("formatted_phone_number") or item.get("phone", ""),
-                "website": item.get("website") or item.get("website_url", ""),
+                "name": display.get("text") or item.get("title") or item.get("name", ""),
+                "address": item.get("formattedAddress") or item.get("formatted_address")
+                           or item.get("address", ""),
+                "phone": item.get("nationalPhoneNumber") or item.get("formatted_phone_number")
+                         or item.get("phone", ""),
+                "website": item.get("websiteUri") or item.get("website") or item.get("website_url", ""),
                 "rating": item.get("rating"),
-                "reviews": item.get("user_ratings_total") or item.get("reviews"),
-                "open_state": item.get("business_status") or item.get("open_state", ""),
+                "reviews": item.get("userRatingCount") or item.get("user_ratings_total")
+                           or item.get("reviews"),
+                "open_state": item.get("businessStatus") or item.get("business_status")
+                              or item.get("open_state", ""),
             })
         return out
 
