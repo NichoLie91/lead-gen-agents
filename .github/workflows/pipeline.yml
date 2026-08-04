@@ -1,0 +1,70 @@
+name: pipeline
+
+on:
+  schedule:
+    - cron: "0 15 * * *"       # 15:00 UTC = 22:00 WIB (user's timezone; Actions cron is UTC)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Which pipeline stage(s) to run
+        type: choice
+        options:
+          - full            # discovery -> enrichment -> scoring -> outreach -> pipeline (default)
+          - discovery       # Atlas only: candidates -> sheet
+          - enrichment      # re-run enrichment for NEEDS_ENRICHMENT / NEEDS_VERIFICATION rows
+          - outreach-email  # send HOT (auto) + approved WARM emails (respects 50/run cap)
+          - outreach-ig     # send IG DMs (respects 15/24h cap + Meta rules)
+          - report          # regenerate last-run report + notify via Telegram
+        default: full
+
+# Pipeline runs never overlap; a bot-poll CAN and SHOULD run concurrently.
+concurrency:
+  group: pipeline
+  cancel-in-progress: false            # never kill a run in progress
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  GH_TOKEN: ${{ secrets.GH_PAT }}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360               # GitHub max; stages are time-boxed well under this
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline (mode=${{ inputs.mode }})
+        run: python -m src.pipeline --mode "${{ inputs.mode }}"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}            # repo variable, default gemini-2.5-flash
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          PIPELINE_MAX_WAIT_SEC: "3600"
+
+# The pipeline script (src/pipeline.py) internally:
+#   1. pre-flights Composio connections (sheets + gmail required; ig optional)
+#   2. runs the selected stage(s) via the 6 agents
+#   3. writes the Google Sheet (Sheets Agent)
+#   4. commits NON-PII state (GitHub Agent); checks the /stop flag between stages
+#   5. writes state/last_run.json and sends the report / failure alert to Telegram

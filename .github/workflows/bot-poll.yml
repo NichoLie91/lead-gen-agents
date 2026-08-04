@@ -1,0 +1,55 @@
+name: bot-poll
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # every 5 minutes; public repo => unlimited Actions minutes
+  workflow_dispatch:           # manual poll for debugging (no inputs)
+
+# Polls must never overlap (getUpdates offset race). The pipeline uses its own
+# group on purpose: the poll stays live during a run so /stop still works.
+concurrency:
+  group: bot-poll
+  cancel-in-progress: false
+
+permissions:
+  contents: read               # real writes go through GH_PAT, not GITHUB_TOKEN
+
+env:
+  PYTHON_VERSION: "3.12"
+  GH_TOKEN: ${{ secrets.GH_PAT }}      # for `gh` CLI calls inside the script
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10                 # one poll must never linger
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false    # authenticate explicitly with GH_PAT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Poll Telegram & dispatch commands
+        run: python -m src.bot.telegram_bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}   # /status may read the sheet
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}       # /status summary may use LLM
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          POLL_MAX_WAIT_SEC: "300"
+
+# State commits (offset, rate-limit budget, stop flag) happen INSIDE the poll
+# script via the GitHub Agent (github_agent.py), which configures git identity
+# and the insteadOf URL rewrite so pushes authenticate with GH_PAT, and only
+# commits when state actually changed.

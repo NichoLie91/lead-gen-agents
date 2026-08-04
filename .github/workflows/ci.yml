@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: PII-commit guard (spec 11)
+        run: |
+          # Fail if committed state files contain obvious PII (emails or
+          # 10+ digit phone numbers). Lead PII must never enter this repo.
+          if grep -rEn --include='*.json' --include='*.md' -E \
+              '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' state/ README.md \
+              | grep -vE 'email@|example\.|@users\.noreply'; then
+            echo "::error::Possible PII (email address) found in committed files"
+            exit 1
+          fi
+          echo "PII guard passed."

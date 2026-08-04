@@ -1,0 +1,18 @@
+{
+  "verticals": ["plumber", "hvac", "cleaning", "mechanic", "dental"],
+  "metros": [
+    "Houston", "Tampa", "Phoenix", "Indianapolis", "Atlanta", "Charlotte",
+    "Orlando", "Denver", "San Antonio", "Las Vegas", "Nashville", "Memphis"
+  ],
+  "rating_min": 4.0,
+  "reviews_min": 5,
+  "reviews_max": 2000,
+  "raw_pool_cap": 250,
+  "target_leads": 250,
+  "per_vertical_cap_pct": 40,
+  "hot_threshold": 90,
+  "warm_threshold": 70,
+  "emails_per_run_max": 50,
+  "ig_dms_per_24h_max": 15,
+  "query_shape": "small {vertical} business {city} no website phone email"
+}
