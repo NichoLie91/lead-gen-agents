@@ -1,20 +1,34 @@
 """Composio Agent — the tool gateway (spec sections 3, 6).
 
-Primary path: ``composio-core`` SDK -> ``ComposioToolSet.execute_action``.
-When ``COMPOSIO_API_KEY`` is absent (local dev / dry-run / pre-setup), the
-agent reports connections as NOT_CONFIGURED and every tool call raises
-``ComposioNotConfigured``; callers then fall back to offline behaviour.
+PRIMARY PATH IS THE V3 REST API. Composio deprecated the v1 backend
+(HTTP 410 "upgrade to v3 APIs") and the last composio-core SDK on PyPI
+(0.7.21) still validates keys against v1, so it cannot be used. We call:
+
+    GET  {base}/connected_accounts            -> connection status
+    GET  {base}/tools?toolkit_slug=X&limit=.. -> tool catalog (slug resolution)
+    POST {base}/tools/execute/{tool_slug}     -> run an action
+
+Body shape for execute (discovered from the v3 OpenAPI spec):
+    {"connected_account_id": "...", "user_id": "default",
+     "arguments": {action-specific params}}
+
+When ``COMPOSIO_API_KEY`` is absent the agent reports connections as
+NOT_CONFIGURED and every tool call raises ``ComposioNotConfigured``.
 """
 from __future__ import annotations
 
 import logging
 
+import httpx
+
 from src.core.config import Settings
 
 log = logging.getLogger(__name__)
 
-# Slug resolution table (spec 6.2): documented slug -> candidate aliases.
-# At startup we resolve against the live Composio catalog when available.
+V3_BASE = "https://backend.composio.dev/api/v3"
+EXECUTE_TIMEOUT = 90.0
+
+# Slug resolution table (spec 6.2): purpose -> candidate action slugs.
 SLUG_ALIASES: dict[str, list[str]] = {
     "send_email": ["GMAIL_SEND_EMAIL", "GMAIL_SEND_MESSAGE"],
     "create_draft": ["GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_CREATE_DRAFT"],
@@ -34,8 +48,19 @@ SLUG_ALIASES: dict[str, list[str]] = {
     "wait_connections": ["COMPOSIO_WAIT_FOR_CONNECTIONS"],
 }
 
+# Map an action slug prefix to the Composio toolkit that owns it (v3 executes
+# require the connected account of the owning toolkit).
+TOOLKIT_BY_PREFIX: tuple[tuple[str, str], ...] = (
+    ("GMAIL_", "gmail"),
+    ("GOOGLESHEETS_", "googlesheets"),
+    ("INSTAGRAM", "instagram"),
+    ("GITHUB_", "github"),
+    ("GOOGLEMAPS_", "googlemaps"),
+    ("COMPOSIO_SEARCH_", ""),        # search tools need no auth
+)
+
 REQUIRED_CONNECTIONS = ("googlesheets", "gmail")
-OPTIONAL_CONNECTIONS = ("instagram",)
+OPTIONAL_CONNECTIONS = ("instagram", "github")
 
 
 class ComposioNotConfigured(Exception):
@@ -48,106 +73,124 @@ class ComposioAgent:
         self.connected = bool(settings.composio_api_key)
         self._toolset = None
         self._slugs: dict[str, str] = {}
+        self._account_by_toolkit: dict[str, str] = {}
         if self.connected:
-            self._try_init_toolset()
+            self._try_init_sdk()
 
     # ---------- lifecycle ----------
-    def _try_init_toolset(self) -> None:
+    def _try_init_sdk(self) -> None:
+        """Try the SDK (harmless if it fails); REST v3 is always the fallback."""
         try:
             from composio import ComposioToolSet  # type: ignore[import-not-found]
 
             self._toolset = ComposioToolSet(api_key=self.settings.composio_api_key)
-            self._resolve_slugs()
-        except ImportError:
-            log.warning("composio-core not installed; Composio Agent runs offline")
-            self.connected = False
-        except Exception as exc:  # bad key etc.
-            log.warning("Composio init failed: %s", exc)
-            self.connected = False
+            self._toolset.get_tools()  # force validation; raises ApiKeyError (410) if broken
+        except Exception as exc:
+            log.info("composio-core SDK unavailable (%s); using Composio v3 REST API", exc)
+            self._toolset = None
 
-    def _resolve_slugs(self) -> None:
-        """Resolve canonical action slugs against the live catalog (spec 6.1)."""
+    # ---------- helpers ----------
+    def _headers(self) -> dict[str, str]:
+        return {"x-api-key": self.settings.composio_api_key}
+
+    def _toolkit_for(self, action: str) -> str:
+        upper = action.upper()
+        for prefix, toolkit in TOOLKIT_BY_PREFIX:
+            if upper.startswith(prefix):
+                return toolkit
+        return ""
+
+    async def refresh_connections(self) -> None:
+        """Build {toolkit_slug: connected_account_id} from the v3 API."""
+        self._account_by_toolkit = {}
         try:
-            tools = self._toolset.get_tools()  # type: ignore[attr-defined]
-            available = {getattr(t, "name", str(t)) for t in tools}
-        except Exception:
-            available = set()
-        for purpose, candidates in SLUG_ALIASES.items():
-            for cand in candidates:
-                if cand in available:
-                    self._slugs[purpose] = cand
-                    break
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(
+                    f"{V3_BASE}/connected_accounts", headers=self._headers()
+                )
+            for account in resp.json().get("items", []):
+                toolkit = (account.get("toolkit") or {}).get("slug")
+                if toolkit and account.get("status") == "ACTIVE":
+                    self._account_by_toolkit[toolkit] = account.get("id", "")
+        except Exception as exc:
+            log.warning("refresh_connections failed: %s", exc)
 
     def slug(self, purpose: str) -> str:
-        resolved = self._slugs.get(purpose)
-        if resolved:
-            return resolved
-        candidates = SLUG_ALIASES.get(purpose, [])
-        return candidates[0] if candidates else purpose
+        return self._slugs.get(purpose) or SLUG_ALIASES.get(purpose, [""])[0]
+
+    async def resolve_slugs(self) -> None:
+        """Resolve canonical action slugs against the live v3 catalog."""
+        self._slugs = {}
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.get(
+                    f"{V3_BASE}/tools", params={"limit": 1000}, headers=self._headers()
+                )
+            available = {t.get("slug", "") for t in resp.json().get("items", [])}
+            for purpose, candidates in SLUG_ALIASES.items():
+                for cand in candidates:
+                    if cand in available:
+                        self._slugs[purpose] = cand
+                        break
+        except Exception as exc:
+            log.warning("resolve_slugs failed: %s", exc)
 
     # ---------- pre-flight ----------
     async def preflight(self) -> dict[str, str]:
-        """Return a status map for required + optional connections.
-
-        Uses the SDK when available, otherwise falls back to the Composio
-        REST API (no SDK required).
-        """
+        """Return a status map for required + optional connections."""
         statuses = {c: "NOT_CONFIGURED" for c in REQUIRED_CONNECTIONS + OPTIONAL_CONNECTIONS}
-        if not self.connected or self._toolset is None:
-            if self.connected:  # key present but SDK missing -> REST fallback
-                return await self._rest_preflight()
+        if not self.connected:
             return statuses
         try:
-            connections = await self._toolset.get_connected_accounts()  # type: ignore[attr-defined]
-            connected = {str(getattr(c, "appUniqueId", None) or getattr(c, "app", "")).lower()
-                         for c in connections}
-            for conn in REQUIRED_CONNECTIONS + OPTIONAL_CONNECTIONS:
-                matched = any(conn in app or app in conn for app in connected)
-                statuses[conn] = "ACTIVE" if matched else "MISSING"
-        except Exception as exc:
-            log.warning("preflight query failed (trying REST): %s", exc)
-            return await self._rest_preflight()
-        return statuses
-
-    async def _rest_preflight(self) -> dict[str, str]:
-        import httpx
-
-        url = "https://backend.composio.dev/api/v1/connected_accounts"
-        statuses = {c: "ERROR" for c in REQUIRED_CONNECTIONS + OPTIONAL_CONNECTIONS}
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.get(
-                    url, params={"user_ids": "default"},
-                    headers={"x-api-key": self.settings.composio_api_key},
+                    f"{V3_BASE}/connected_accounts", headers=self._headers()
                 )
             if resp.status_code != 200:
                 return {c: f"ERROR {resp.status_code}" for c in statuses}
-            payload = resp.json()
-            accounts = payload if isinstance(payload, list) else payload.get("items", [])
-            connected = {str(a.get("appUniqueId", "")).lower() for a in accounts}
-            for conn in REQUIRED_CONNECTIONS + OPTIONAL_CONNECTIONS:
-                matched = any(conn in app or app in conn for app in connected)
-                statuses[conn] = "ACTIVE" if matched else "MISSING"
+            items = resp.json().get("items", [])
+            for account in items:
+                toolkit = (account.get("toolkit") or {}).get("slug", "")
+                for conn in REQUIRED_CONNECTIONS + OPTIONAL_CONNECTIONS:
+                    if conn in toolkit or toolkit in conn:
+                        statuses[conn] = "ACTIVE" if account.get("status") == "ACTIVE" else "MISSING"
+            return statuses
         except Exception as exc:
-            log.warning("REST preflight failed: %s", exc)
-        return statuses
+            log.warning("preflight failed: %s", exc)
+            return {c: "ERROR" for c in statuses}
 
-    # ---------- tool execution ----------
+    # ---------- tool execution (v3 REST) ----------
     async def execute_action(self, action: str, params: dict) -> dict:
-        if not self.connected or self._toolset is None:
+        if not self.connected:
             raise ComposioNotConfigured(f"{action} requires COMPOSIO_API_KEY")
+        if not self._account_by_toolkit:
+            await self.refresh_connections()
+
+        body: dict = {"arguments": params or {}, "user_id": "default"}
+        toolkit = self._toolkit_for(action)
+        account_id = self._account_by_toolkit.get(toolkit, "")
+        if toolkit and account_id:
+            body["connected_account_id"] = account_id
+
         try:
-            result = await self._toolset.execute_action(action=action, params=params)  # type: ignore[attr-defined]
-            return {"ok": True, "action": action, "data": result}
-        except Exception as exc:
-            log.error("Composio action %s failed: %s", action, exc)
+            async with httpx.AsyncClient(timeout=EXECUTE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{V3_BASE}/tools/execute/{action}",
+                    json=body, headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            log.error("Composio action %s transport error: %s", action, exc)
             return {"ok": False, "action": action, "error": str(exc)}
 
+        if resp.status_code != 200:
+            log.error("Composio action %s failed: %s", action, resp.text[:300])
+            return {"ok": False, "action": action, "error": resp.text[:300]}
+        return {"ok": True, "action": action, "data": resp.json().get("data", resp.json())}
+
+    # ---------- higher-level tools ----------
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:
-        """Google Maps search; returns normalized result dicts."""
         resp = await self.execute_action(
-            self.slug("maps_search"),
-            {"query": query, "start": start},
+            self.slug("maps_search"), {"query": query, "start": start}
         )
         if not resp.get("ok"):
             return []

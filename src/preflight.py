@@ -24,7 +24,7 @@ from src.core.config import Settings
 log = logging.getLogger(__name__)
 
 REQUIRED = ("googlesheets", "gmail")
-OPTIONAL = ("instagram",)
+OPTIONAL = ("instagram", "github")
 
 
 async def _check() -> None:
@@ -48,18 +48,17 @@ async def _check() -> None:
 
 
 async def _rest_preflight(api_key: str) -> dict[str, str]:
-    """Fallback REST check that does not require the composio-core SDK."""
-    url = "https://backend.composio.dev/api/v1/connected_accounts"
+    """Fallback REST check (v3 API) that does not require the composio-core SDK."""
+    url = "https://backend.composio.dev/api/v3/connected_accounts"
     statuses = {c: "UNKNOWN" for c in REQUIRED + OPTIONAL}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, params={"user_ids": "default"},
-                                    headers={"x-api-key": api_key})
+            resp = await client.get(url, headers={"x-api-key": api_key})
         if resp.status_code != 200:
             return {c: f"ERROR {resp.status_code}" for c in statuses}
-        accounts = resp.json() if isinstance(resp.json(), list) else resp.json().get("items", [])
+        accounts = resp.json().get("items", [])
         connected = {
-            str(a.get("appUniqueId", "")).lower()
+            str((a.get("toolkit") or {}).get("slug", "")).lower()
             for a in accounts
         }
         for conn in list(statuses):

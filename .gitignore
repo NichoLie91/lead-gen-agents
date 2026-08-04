@@ -21,3 +21,7 @@ Thumbs.db
 
 # NOTE: state/ is intentionally NOT ignored — non-PII run state must be
 # committed so it survives between ephemeral GitHub Actions jobs.
+
+# never commit token temps
+state/.gh_token*
+*.tmp

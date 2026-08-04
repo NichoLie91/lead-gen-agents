@@ -11,6 +11,11 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # python-dotenv optional for CI (secrets come from Actions)
+    load_dotenv = None
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Lead-criteria defaults (spec section 7.1)
@@ -58,6 +63,9 @@ class Settings:
 
     @classmethod
     def load(cls, env: dict | None = None) -> Settings:
+        # Local dev: load .env (gitignored) when no explicit env mapping is given.
+        if env is None and load_dotenv is not None:
+            load_dotenv(REPO_ROOT / ".env", override=False)
         env = os.environ if env is None else env
         settings = cls(
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
