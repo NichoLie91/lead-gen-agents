@@ -100,7 +100,7 @@ class SheetsAgent:
         if not self._composio.connected or self._settings.dry_run:
             return self._mirror.get(tab, [])
         resp = await self._composio.execute_action(
-            self._composio.slug("sheet_values_update"),  # informational only
+            self._composio.slug("sheet_read"),
             {"spreadsheet_id": self._sheet_id, "range": f"'{tab}'!A1:Z1000"},
         )
         data = resp.get("data") if resp.get("ok") else []

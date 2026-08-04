@@ -142,6 +142,11 @@ async def main() -> int:
     import src.core.logging as logmod
     logmod.setup_logging()
     settings = Settings.load()
+    if not settings.admin_telegram_ids:
+        log.warning(
+            "ADMIN_TELEGRAM_IDS is empty: the bot is OPEN, any chat with the "
+            "link can send commands (use /id to fetch your user ID)"
+        )
     state = StateStore(settings.state_dir)
     github = GitHubAgent(settings, state)
     processed = await poll_once(settings, state, github)

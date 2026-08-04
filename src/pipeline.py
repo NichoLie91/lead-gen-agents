@@ -119,8 +119,35 @@ class Pipeline:
     # ---------- stages ----------
     async def _stage_discovery(self, report: dict) -> list[dict]:
         raw = await self.atlas.run()
+        if not self.settings.dry_run:
+            raw = self._filter_new_leads(raw)  # cross-run dedupe (spec 10)
         report.setdefault("metrics", {})["candidates"] = len(raw)
         return raw
+
+    def _filter_new_leads(self, raw: list[dict]) -> list[dict]:
+        """Drop leads already seen in previous runs (PII-safe sha256 registry).
+
+        Only the hash of (name, address) is stored in ``state/dedupe.json`` so
+        nothing identifiable leaks into the public repo (spec 11).
+        """
+        import hashlib
+
+        registry = self.state.load("dedupe", {"keys": []})
+        seen = set(registry.get("keys", []))
+        kept: list[dict] = []
+        new_keys: list[str] = []
+        for lead in raw:
+            key = hashlib.sha256(
+                f"{lead.get('name', '')}|{lead.get('address', '')}".lower().encode()
+            ).hexdigest()
+            if key in seen:
+                continue
+            kept.append(lead)
+            new_keys.append(key)
+        if new_keys:
+            seen.update(new_keys)
+            self.state.save_if_changed("dedupe", {"keys": sorted(seen)})
+        return kept
 
     async def _stage_enrichment(self, raw: list[dict], report: dict) -> list[dict]:
         enriched = await enrich_leads(raw, self.composio, self.settings)
@@ -244,7 +271,7 @@ class Pipeline:
         hook = self._hook(lead)
         subject = f"Quick question for {name}"[:50]
         body = (
-            f"Hi {name} team — I help {lead.get('vertical', 'service')} businesses "
+            f"Hi {name} team. I help {lead.get('vertical', 'service')} businesses "
             f"in {city} cut the busywork that eats the week. I saw your {rating} star "
             f"profile and one thing stood out: {hook}.\n\n"
             f"I don't sell a generic chatbot. I scope custom AI builds for the exact "
@@ -266,7 +293,7 @@ class Pipeline:
 
     @staticmethod
     def _ig_first_message(lead: dict) -> str:
-        return (f"Quick one — who texts back your missed calls after 5pm? "
+        return (f"Quick one. Who texts back your missed calls after 5pm? "
                 f"Saw your {lead.get('rating')} star profile in {lead.get('city')}.")
 
     @staticmethod

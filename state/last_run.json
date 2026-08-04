@@ -1,7 +1,7 @@
 {
-  "run_id": "8014b931",
+  "run_id": "ba0adec7",
   "mode": "full",
-  "started_at": "2026-08-04T17:38:17.096276+00:00",
+  "started_at": "2026-08-04T17:46:05.308688+00:00",
   "status": "COMPLETED",
   "metrics": {
     "candidates": 60,
@@ -18,5 +18,5 @@
     "ig_skipped": 51,
     "pipeline_rows": 59
   },
-  "finished_at": "2026-08-04T17:38:17.118537+00:00"
+  "finished_at": "2026-08-04T17:46:05.321904+00:00"
 }

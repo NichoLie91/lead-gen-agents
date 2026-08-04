@@ -19,6 +19,11 @@ log = logging.getLogger(__name__)
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PLACEHOLDER = "[email protected]"
 
+# AI chatbot widget + agency/template-mill signatures scanned in homepage HTML
+# (spec 7.2). Filling these flags lets Scout's -20 disqualifier penalties fire.
+CHATBOT_SIGNATURES = ("intercom", "drift", "tidio", "voiceflow", "chat-widget", "crisp.chat")
+AGENCY_MARKERS = ("powered by thrive", "powered by wix", "built with squarespace", "template by")
+
 # Aggregators/redirectors that are never real business mailboxes (spec 7.3).
 BLOCKLIST_DOMAINS = {
     "example.com", "gstatic.com", "facebook.com", "schema.org", "nextdoor.com",
@@ -95,6 +100,9 @@ async def enrich_leads(
             lead["email"] = normalize_email(email)
             instagram = instagram or await _find_instagram(composio, lead)
             lead["instagram"] = normalize_instagram(instagram)
+            if lead.get("website") and not lead.get("_mock"):
+                lead["_chatbot"] = await _has_chatbot(composio, lead["website"])
+                lead["_agency_built"] = await _has_agency_marker(composio, lead["website"])
 
         lead["email_status"] = "VERIFIED" if lead.get("email") else "NEEDS_ENRICHMENT"
         lead["ig_status"] = "VERIFIED" if lead.get("instagram") else "NEEDS_VERIFICATION"
@@ -120,6 +128,22 @@ async def _find_email(composio: ComposioAgent, lead: dict) -> str | None:
     except ComposioNotConfigured:
         pass
     return None
+
+
+async def _has_chatbot(composio: ComposioAgent, url: str) -> bool:
+    try:
+        html = (await composio.fetch_url(url) or "").lower()
+        return any(sig in html for sig in CHATBOT_SIGNATURES)
+    except ComposioNotConfigured:
+        return False
+
+
+async def _has_agency_marker(composio: ComposioAgent, url: str) -> bool:
+    try:
+        html = (await composio.fetch_url(url) or "").lower()
+        return any(marker in html for marker in AGENCY_MARKERS)
+    except ComposioNotConfigured:
+        return False
 
 
 async def _find_instagram(composio: ComposioAgent, lead: dict) -> str | None:

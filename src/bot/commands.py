@@ -17,8 +17,6 @@ COMMAND_HELP = {
 }
 
 KNOWN_COMMANDS = {c.lower(): c for c in COMMAND_HELP}
-SIDE_EFFECT_COMMANDS = ("/run", "/send all email", "/send all instagram",
-                        "/approve", "/reject", "/reject all", "/stop")
 
 
 def parse_command(text: str | None) -> tuple[str, str]:

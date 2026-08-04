@@ -187,6 +187,11 @@ class GitHubRateLimiter:
 
     # ---------- public API ----------
     async def reserve(self, points: int = 1, method: str = "GET", max_wait: float = 3600.0) -> None:
+        """Block until a request of ``points`` is safe, then consume the budget.
+
+        Does NOT manage the concurrency semaphore: callers that issue actual
+        HTTP requests use ``guarded_gh_api`` which owns acquire/release.
+        """
         points = POINTS_BY_METHOD.get(method.upper(), points)
         async with self._lock:
             now = self._clock()
@@ -194,7 +199,6 @@ class GitHubRateLimiter:
             wait = self.effective_wait(points, now, max_wait)
         if wait > 0:
             await asyncio.sleep(wait)
-        await self._sem.acquire()  # caller releases via _release() after the request
         async with self._lock:
             now = self._clock()
             self._refill(now)
@@ -231,6 +235,7 @@ class GitHubRateLimiter:
             if method in ("GET", "HEAD") and path in self._etags:
                 hdrs["If-None-Match"] = self._etags[path]
             await self.reserve(points=1, method=method, max_wait=max_wait)
+            await self._sem.acquire()  # concurrency cap: 100 (spec 8.3)
             try:
                 resp = await executor(method, path, hdrs, body or {})
             finally:
