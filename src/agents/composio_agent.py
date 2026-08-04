@@ -29,24 +29,31 @@ V3_BASE = "https://backend.composio.dev/api/v3"
 EXECUTE_TIMEOUT = 90.0
 
 # Slug resolution table (spec 6.2): purpose -> candidate action slugs.
+# Verified against the live v3 catalog (2026-08): the googlesheets toolkit has
+# NO add-tab action, so each tab lives in its own spreadsheet
+# (GOOGLESHEETS_SHEET_FROM_JSON) and tabs are rewritten via clear-range +
+# GOOGLESHEETS_BATCH_UPDATE (named-tab write). Reads use GOOGLESHEETS_BATCH_GET.
 SLUG_ALIASES: dict[str, list[str]] = {
     "send_email": ["GMAIL_SEND_EMAIL", "GMAIL_SEND_MESSAGE"],
     "create_draft": ["GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_CREATE_DRAFT"],
     "send_draft": ["GMAIL_SEND_DRAFT"],
-    "sheet_values_update": ["GOOGLESHEETS_VALUES_UPDATE", "GOOGLESHEETS_UPDATE_SPREADSHEET_VALUES"],
-    "sheet_create": ["GOOGLESHEETS_CREATE_GOOGLE_SHEET1", "GOOGLESHEETS_CREATE_SPREADSHEET"],
-    "sheet_add_sheet": ["GOOGLESHEETS_ADD_SHEET"],
-    "sheet_batch_update": ["GOOGLESHEETS_UPDATE_VALUES_BATCH"],
+    "sheet_create_named": ["GOOGLESHEETS_SHEET_FROM_JSON"],
+    "sheet_clear": ["GOOGLESHEETS_CLEAR_VALUES"],
+    "sheet_values_update": ["GOOGLESHEETS_BATCH_UPDATE"],
     "sheet_get_info": ["GOOGLESHEETS_GET_SPREADSHEET_INFO", "GOOGLESHEETS_GET_SHEET_NAMES"],
-    "sheet_read": ["GOOGLESHEETS_GET_VALUES", "GOOGLESHEETS_GET_SPREADSHEET_VALUES", "GOOGLESHEETS_GET_SHEET_VALUES"],
+    "sheet_read": ["GOOGLESHEETS_BATCH_GET"],
     "maps_search": ["COMPOSIO_SEARCH_GOOGLE_MAPS", "GOOGLEMAPS_TEXT_SEARCH"],
     "web_search": ["COMPOSIO_SEARCH_WEB", "SERPER_GOOGLE_SEARCH", "TAVILY_WEB_SEARCH"],
     "fetch_url": ["COMPOSIO_SEARCH_FETCH_URL_CONTENT"],
-    "ig_send_dm": ["INSTAGRAMBUSINESS_SEND_MESSAGE", "INSTAGRAM_SEND_DIRECT_MESSAGE"],
+    "ig_send_dm": ["INSTAGRAM_SEND_TEXT_MESSAGE"],
     "multi_execute": ["COMPOSIO_MULTI_EXECUTE_TOOL"],
     "manage_connections": ["COMPOSIO_MANAGE_CONNECTIONS"],
     "wait_connections": ["COMPOSIO_WAIT_FOR_CONNECTIONS"],
 }
+
+# Toolkits whose catalogs we resolve slugs against (per-toolkit fetches return
+# the full tool set reliably; a single unfiltered fetch is capped).
+RESOLVE_TOOLKITS = ("gmail", "googlesheets", "instagram", "github", "composio")
 
 # Map an action slug prefix to the Composio toolkit that owns it (v3 executes
 # require the connected account of the owning toolkit).
@@ -73,6 +80,7 @@ class ComposioAgent:
         self.connected = bool(settings.composio_api_key)
         self._toolset = None
         self._slugs: dict[str, str] = {}
+        self._slugs_resolved = False
         self._account_by_toolkit: dict[str, str] = {}
         if self.connected:
             self._try_init_sdk()
@@ -119,19 +127,30 @@ class ComposioAgent:
         return self._slugs.get(purpose) or SLUG_ALIASES.get(purpose, [""])[0]
 
     async def resolve_slugs(self) -> None:
-        """Resolve canonical action slugs against the live v3 catalog."""
+        """Resolve canonical action slugs against the live v3 catalog.
+
+        Fetches the catalog per toolkit so every candidate list is complete,
+        then keeps the first candidate that actually exists. Runs lazily once
+        per process before the first tool execution.
+        """
         self._slugs = {}
         try:
+            available: set[str] = set()
             async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.get(
-                    f"{V3_BASE}/tools", params={"limit": 1000}, headers=self._headers()
-                )
-            available = {t.get("slug", "") for t in resp.json().get("items", [])}
+                for toolkit in RESOLVE_TOOLKITS:
+                    resp = await client.get(
+                        f"{V3_BASE}/tools",
+                        params={"toolkit_slug": toolkit, "limit": 1000},
+                        headers=self._headers(),
+                    )
+                    for item in resp.json().get("items", []):
+                        available.add(item.get("slug", ""))
             for purpose, candidates in SLUG_ALIASES.items():
                 for cand in candidates:
                     if cand in available:
                         self._slugs[purpose] = cand
                         break
+            self._slugs_resolved = True
         except Exception as exc:
             log.warning("resolve_slugs failed: %s", exc)
 
@@ -163,6 +182,8 @@ class ComposioAgent:
     async def execute_action(self, action: str, params: dict) -> dict:
         if not self.connected:
             raise ComposioNotConfigured(f"{action} requires COMPOSIO_API_KEY")
+        if self.connected and not self._slugs_resolved:
+            await self.resolve_slugs()
         if not self._account_by_toolkit:
             await self.refresh_connections()
 
@@ -185,7 +206,19 @@ class ComposioAgent:
         if resp.status_code != 200:
             log.error("Composio action %s failed: %s", action, resp.text[:300])
             return {"ok": False, "action": action, "error": resp.text[:300]}
-        return {"ok": True, "action": action, "data": resp.json().get("data", resp.json())}
+        payload = resp.json()
+        # Composio returns HTTP 200 even when the action itself failed; the
+        # failure is signalled by the body's ``successful`` flag (or an embedded
+        # ``http_error``). Treat those as failures (verified against v3 API).
+        if payload.get("successful") is False:
+            err = payload.get("error") or payload.get("message") or ""
+            log.error("Composio action %s failed: %s", action, str(err)[:300])
+            return {"ok": False, "action": action, "error": str(err)[:300]}
+        data = payload.get("data", payload)
+        if isinstance(data, dict) and "http_error" in data:
+            log.error("Composio action %s failed: %s", action, str(data)[:300])
+            return {"ok": False, "action": action, "error": str(data)[:300]}
+        return {"ok": True, "action": action, "data": data}
 
     # ---------- higher-level tools ----------
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:
@@ -238,5 +271,5 @@ class ComposioAgent:
     async def ig_send_dm(self, *, recipient_id: str, message: str) -> dict:
         return await self.execute_action(
             self.slug("ig_send_dm"),
-            {"recipient_id": recipient_id, "message": message},
+            {"recipient_id": recipient_id, "text": message},
         )

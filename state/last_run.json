@@ -1,22 +1,13 @@
 {
-  "run_id": "ba0adec7",
-  "mode": "full",
-  "started_at": "2026-08-04T17:46:05.308688+00:00",
+  "run_id": "1b54ea37",
+  "mode": "discovery",
+  "started_at": "2026-08-04T18:51:25.476298+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "candidates": 60,
-    "with_email": 23,
-    "needs_enrichment": 37,
-    "tiers": {
-      "HOT-VERIFIED": 8,
-      "WARM": 51
-    },
-    "emails_sent": 8,
-    "emails_drafted": 15,
-    "emails_skipped": 36,
-    "ig_sent": 8,
-    "ig_skipped": 51,
-    "pipeline_rows": 59
+    "candidates": 0,
+    "with_email": 0,
+    "needs_enrichment": 0,
+    "tiers": {}
   },
-  "finished_at": "2026-08-04T17:46:05.321904+00:00"
+  "finished_at": "2026-08-04T18:52:03.479670+00:00"
 }

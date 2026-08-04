@@ -1,6 +1,11 @@
 """Sheets Agent — the only writer to the Google Sheet (spec section 7.7).
 
-Online: Composio GOOGLESHEETS_* actions with 'Tab'!A1 range formatting.
+Online: Composio GOOGLESHEETS_* actions. Verified against the live v3
+catalog (2026-08): the googlesheets toolkit has NO add-tab action, so each
+logical tab (Pipeline / Score / Outreach / Followup) lives in its OWN
+spreadsheet, created via GOOGLESHEETS_SHEET_FROM_JSON with the tab's header
+row. Tabs are rewritten as clear-range + GOOGLESHEETS_BATCH_UPDATE.
+
 Offline/dry-run: mirrors tabs into ``state/sheet_mirror.json`` so the
 pipeline can be exercised end-to-end without a Composio connection.
 """
@@ -8,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from src.agents.composio_agent import ComposioAgent, ComposioNotConfigured
+from src.agents.composio_agent import ComposioAgent
 from src.core.config import Settings
 from src.core.state import StateStore
 
@@ -39,44 +44,61 @@ class SheetsAgent:
         self._composio = composio
         self._settings = settings
         self._state = state
+        # {tab: spreadsheet_id}. ``_sheet_id`` is the primary (Pipeline) id for
+        # backward-compat with settings.google_sheet_id / sheet_url().
+        self._sheet_ids: dict[str, str] = {}
         self._sheet_id = settings.google_sheet_id
+        stored = state.load("sheet_ids", {})
+        if isinstance(stored, dict):
+            self._sheet_ids = {k: v for k, v in stored.items() if v}
+            if self._sheet_id and "Pipeline" not in self._sheet_ids:
+                self._sheet_ids["Pipeline"] = self._sheet_id
         self._mirror: dict[str, list[list]] = {}
 
     # ---------- lifecycle ----------
     async def ensure_sheet(self) -> str:
-        """Return a usable sheet id (creates one if absent). Offline -> mirror id."""
-        if self._sheet_id:
+        """Return the primary (Pipeline) spreadsheet id, creating one
+        spreadsheet per tab on first use. Offline -> mirror id."""
+        if self._sheet_id and "Pipeline" in self._sheet_ids:
             return self._sheet_id
         if not self._composio.connected or self._settings.dry_run:
             self._sheet_id = "DRY-RUN-MIRROR"
             self._init_mirror()
             return self._sheet_id
-        try:
+        for tab in TABS:
+            if tab in self._sheet_ids:
+                continue
             resp = await self._composio.execute_action(
-                self._composio.slug("sheet_create"),
-                {"title": self._sheet_name()},
+                self._composio.slug("sheet_create_named"),
+                {
+                    "title": f"{self._sheet_name()} - {tab}",
+                    "sheet_name": tab,
+                    "sheet_json": [{h: "" for h in HEADERS.get(tab, [])}],
+                },
             )
-            if resp.get("ok"):
-                self._sheet_id = str(resp["data"].get("spreadsheetId", ""))
-                self._settings.google_sheet_id = self._sheet_id
-                self._ensure_tabs()
-            return self._sheet_id or "UNKNOWN"
-        except ComposioNotConfigured:
-            self._sheet_id = "DRY-RUN-MIRROR"
-            self._init_mirror()
-            return self._sheet_id
+            if not resp.get("ok"):
+                log.warning("create spreadsheet for tab %s failed: %s",
+                            tab, str(resp.get("error", ""))[:150])
+                continue
+            data = resp.get("data") or {}
+            rd = data.get("response_data") or data
+            sid = rd.get("spreadsheetId") or rd.get("spreadsheet_id") or ""
+            if sid:
+                self._sheet_ids[tab] = sid
+        if self._sheet_ids:
+            self._sheet_id = self._sheet_ids.get("Pipeline",
+                                                 self._sheet_ids.get("Score", ""))
+            self._settings.google_sheet_id = self._sheet_id
+            self._state.save("sheet_ids", self._sheet_ids)
+        return self._sheet_id or "UNKNOWN"
 
     def _sheet_name(self) -> str:
         count = self._settings.crit("target_leads", 250)
         verticals = ", ".join(self._settings.verticals[:2])
         return f"AI Lead Gen Machine — Pipeline ({count} {verticals} leads)"
 
-    async def _ensure_tabs(self) -> None:
-        for tab in TABS:
-            await self._composio.execute_action(
-                self._composio.slug("sheet_add_sheet"),
-                {"spreadsheet_id": self._sheet_id, "sheet_name": tab},
-            )
+    def _tab_sheet_id(self, tab: str) -> str:
+        return self._sheet_ids.get(tab, "")
 
     # ---------- reads/writes ----------
     async def write_tab(self, tab: str, rows: list[list]) -> bool:
@@ -86,25 +108,40 @@ class SheetsAgent:
             self._mirror[tab] = values
             self._persist_mirror()
             return True
-        resp = await self._composio.execute_action(
-            self._composio.slug("sheet_values_update"),
-            {
-                "spreadsheet_id": self._sheet_id,
-                "range": f"'{tab}'!A1",
-                "values": values,
-            },
+        if not self._sheet_ids:
+            await self.ensure_sheet()
+        sid = self._tab_sheet_id(tab)
+        if not sid:
+            log.warning("no spreadsheet for tab %s; skipping live write", tab)
+            return False
+        clear = await self._composio.execute_action(
+            self._composio.slug("sheet_clear"),
+            {"spreadsheet_id": sid, "range": f"'{tab}'!A1:Z1000"},
         )
-        return bool(resp.get("ok"))
+        write = await self._composio.execute_action(
+            self._composio.slug("sheet_values_update"),
+            {"spreadsheet_id": sid, "sheet_name": tab, "values": values},
+        )
+        return bool(clear.get("ok") and write.get("ok"))
 
     async def read_tab(self, tab: str) -> list[list]:
         if not self._composio.connected or self._settings.dry_run:
             return self._mirror.get(tab, [])
+        if not self._sheet_ids:
+            await self.ensure_sheet()
+        sid = self._tab_sheet_id(tab)
+        if not sid:
+            return []
         resp = await self._composio.execute_action(
-            self._composio.slug("sheet_read"),
-            {"spreadsheet_id": self._sheet_id, "range": f"'{tab}'!A1:Z1000"},
+            self._composio.slug("sheet_read"), {"spreadsheet_id": sid}
         )
-        data = resp.get("data") if resp.get("ok") else []
-        return data.get("values", []) if isinstance(data, dict) else []
+        data = resp.get("data") if resp.get("ok") else {}
+        if not isinstance(data, dict):
+            return []
+        value_ranges = data.get("valueRanges") or data.get("values")
+        if isinstance(value_ranges, dict):
+            return value_ranges.get("values", []) or []
+        return value_ranges if isinstance(value_ranges, list) else []
 
     def sheet_url(self) -> str:
         if self._sheet_id and self._sheet_id != "DRY-RUN-MIRROR":

@@ -81,6 +81,8 @@ class Pipeline:
 
         try:
             scored: list[dict] = []
+            if mode != "report":
+                await self.sheets.ensure_sheet()  # create/reuse per-tab spreadsheets
             if mode in ("full", "discovery", "enrichment", "outreach-email", "outreach-ig"):
                 raw = await self._stage_discovery(report)
                 self._check_stop()
@@ -332,10 +334,9 @@ def main() -> None:
     args = parser.parse_args()
 
     import os
-    env = dict(os.environ)
     if args.dry_run:
-        env["DRY_RUN"] = "1"
-    settings = Settings.load(env)
+        os.environ["DRY_RUN"] = "1"
+    settings = Settings.load()  # merges local .env; Actions secrets already in env
     import src.core.logging as logmod
     logmod.setup_logging()
 
