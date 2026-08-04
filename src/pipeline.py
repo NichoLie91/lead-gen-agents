@@ -104,6 +104,10 @@ class Pipeline:
                 await self._stage_pipeline(scored, report)
 
             report["status"] = "COMPLETED"
+            if not self.settings.dry_run:
+                sheet_url = (f"https://docs.google.com/spreadsheets/d/{self.settings.google_sheet_id}"
+                             if self.settings.google_sheet_id else "")
+                await self.notifier.notify(self.build_report_text(report, sheet_url))
         except StopRequested:
             report["status"] = "STOPPED"
         except Exception as exc:
