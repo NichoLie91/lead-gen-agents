@@ -103,6 +103,16 @@ class Pipeline:
             if mode == "full":
                 await self._stage_pipeline(scored, report)
 
+            # All tab writes are queued by write_tab(); flush them to the live
+            # sheet ONCE, at the end of the run (quota-safe: reads are cached,
+            # writes are batched, throttles retry with backoff in execute_action).
+            if mode != "report" and self.sheets.has_pending_writes():
+                ok_tabs, failed_tabs = await self.sheets.flush()
+                report["metrics"]["sheet_tabs_written"] = ok_tabs
+                report["metrics"]["sheet_tabs_failed"] = failed_tabs
+                if failed_tabs:
+                    log.error("sheet flush: %d tab(s) failed to write", failed_tabs)
+
             report["status"] = "COMPLETED"
             if not self.settings.dry_run:
                 sheet_url = (f"https://docs.google.com/spreadsheets/d/{self.settings.google_sheet_id}"
@@ -325,6 +335,9 @@ class Pipeline:
                          f"drafted={metrics.get('emails_drafted', 0)} "
                          f"skipped={metrics.get('emails_skipped', 0)}")
             lines.append(f"IG: sent={metrics.get('ig_sent', 0)} skipped={metrics.get('ig_skipped', 0)}")
+            if metrics.get("sheet_tabs_failed"):
+                lines.append(f"⚠️ Sheet write FAILED for {metrics['sheet_tabs_failed']} tab(s) "
+                             f"({metrics.get('sheet_tabs_written', 0)} ok)")
         if sheet_url:
             lines.append(f"Sheet: {sheet_url}")
         return "\n".join(lines)

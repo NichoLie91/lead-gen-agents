@@ -4,8 +4,11 @@ Responsibilities:
 - commit NON-PII state back to the repo (only when git reports changes;
   git identity configured inline; pushes authenticated with GH_PAT via
   an insteadOf URL rewrite)
-- trigger ``pipeline.yml`` via ``gh workflow run`` (modes: full / outreach-email / ...)
-- report pipeline run status for /status and the /run guard
+- trigger ``pipeline.yml`` via GitHub's REST dispatch endpoint
+  (POST /repos/{owner}/{repo}/actions/workflows/pipeline.yml/dispatches with
+  {"ref": <branch>, "inputs": {"mode": ...}} and Bearer GH_PAT auth), with
+  graceful readable errors for 403/404/422 so the bot never crashes
+- report pipeline run status for /status and the /run guard (REST)
 - persist the /stop flag the pipeline checks between stages
 
 In dry-run mode (no GH_PAT) every operation is a safe no-op so the
@@ -13,14 +16,16 @@ pipeline runs offline.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
+import re
 import subprocess
 import time
 
+import httpx
+
 from src.core.config import Settings
-from src.core.rate_limiter import GitHubRateLimiter
+from src.core.rate_limiter import GitHubRateLimiter, RateLimitExceeded
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -29,6 +34,17 @@ STATE_FILES = [
     "telegram_offset", "github_ratelimit", "stop_requested",
     "pipeline_running", "last_run", "dedupe", "sheet_mirror",
 ]
+
+GITHUB_API = "https://api.github.com"
+PIPELINE_WORKFLOW = "pipeline.yml"
+DEFAULT_BRANCH = "main"
+DISPATCH_TIMEOUT = 15.0
+
+# GitHub REST endpoint used to trigger a workflow run:
+#   POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches
+#   body: {"ref": "main", "inputs": {...}}
+# Requires a PAT with the "workflow" scope; a token with only "repo" scope
+# returns HTTP 403 (the failure the bot used to crash on).
 
 
 class GitHubAgent:
@@ -100,35 +116,105 @@ class GitHubAgent:
             env["GIT_CONFIG_VALUE_0"] = "https://github.com/"
         return env
 
-    # ---------- workflow control ----------
+    # ---------- workflow control (REST, not the `gh` CLI) ----------
+    def _repo_slug(self) -> str:
+        """"owner/repo" from GITHUB_REPOSITORY or the git remote."""
+        env_slug = os.environ.get("GITHUB_REPOSITORY", "").strip().strip("/")
+        if env_slug and "/" in env_slug:
+            return env_slug
+        try:
+            remote = subprocess.run(
+                ["git", "-C", str(self._settings.repo_root), "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+        except Exception:
+            remote = ""
+        match = re.search(r"(?:github\.com[/:])([^/]+)/([^/\s]+?)(?:\.git)?$", remote)
+        if match:
+            return f"{match.group(1)}/{match.group(2)}"
+        return ""
+
+    def _dispatch_ref(self) -> str:
+        """Branch to dispatch on: GITHUB_REF / GITHUB_REF_NAME, else main."""
+        return (
+            os.environ.get("GITHUB_REF", "")
+            or os.environ.get("GITHUB_REF_NAME", "")
+            or DEFAULT_BRANCH
+        )
+
+    def _gh_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._settings.gh_pat}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "lead-gen-agents",
+        }
+
     async def trigger_pipeline(self, mode: str = "full") -> str:
+        """Dispatch pipeline.yml via GitHub's REST dispatch endpoint.
+
+        Returns a human-readable message the Telegram bot can send back
+        verbatim — never raises, so a 403/API error cannot crash the poller.
+        """
         if not self._enabled:
             return "skipped (dry-run / GH_PAT not set)"
+        slug = self._repo_slug()
+        if not slug:
+            return "trigger failed: could not determine owner/repo (set GITHUB_REPOSITORY or git remote origin)"
+        url = f"{GITHUB_API}/repos/{slug}/actions/workflows/{PIPELINE_WORKFLOW}/dispatches"
+        payload = {"ref": self._dispatch_ref(), "inputs": {"mode": mode}}
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "gh", "workflow", "run", "pipeline.yml", "-f", f"mode={mode}",
-                env={**os.environ, "GH_TOKEN": self._settings.gh_pat},
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                return f"trigger failed: {stderr.decode(errors='replace').strip()}"
-            return f"triggered pipeline mode={mode}"
+            await self._limiter.reserve(points=5, method="POST", max_wait=30)
+        except RateLimitExceeded as exc:
+            return f"trigger failed: GitHub API rate budget exhausted ({exc})"
+        try:
+            async with httpx.AsyncClient(timeout=DISPATCH_TIMEOUT) as client:
+                resp = await client.post(url, json=payload, headers=self._gh_headers())
         except Exception as exc:
-            return f"trigger failed: {exc}"
+            return f"trigger failed: {exc} (GitHub API unreachable?)"
+
+        if resp.status_code == 204:
+            return f"triggered pipeline mode={mode} on {slug}@{self._dispatch_ref()}"
+        if resp.status_code == 403:
+            return (
+                "trigger failed: GitHub rejected the dispatch (403). This usually "
+                "means the GH_PAT token is missing the 'workflow' scope. Regenerate "
+                "the token in GitHub → Settings → Developer settings → Personal "
+                "access tokens with 'repo' AND 'workflow' scopes, then update the "
+                "GH_PAT repo secret."
+            )
+        if resp.status_code == 404:
+            return (
+                f"trigger failed: workflow '{PIPELINE_WORKFLOW}' not found in {slug} "
+                "(404). Check the repo slug and that the workflow file exists on the branch."
+            )
+        if resp.status_code == 422:
+            return (
+                "trigger failed: GitHub rejected the dispatch payload (422). Check "
+                f"that branch '{self._dispatch_ref()}' exists and inputs match the "
+                "workflow_dispatch definition."
+            )
+        return (
+            f"trigger failed: GitHub API returned {resp.status_code} — "
+            f"{resp.text[:200]}"
+        )
 
     async def pipeline_in_progress(self) -> bool:
+        """True when a pipeline.yml run is currently in_progress (REST)."""
         if not self._enabled:
             return False
+        slug = self._repo_slug()
+        if not slug:
+            return False
+        url = f"{GITHUB_API}/repos/{slug}/actions/workflows/{PIPELINE_WORKFLOW}/runs"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "gh", "run", "list", "--workflow", "pipeline.yml",
-                "--status", "in_progress", "--limit", "1",
-                env={**os.environ, "GH_TOKEN": self._settings.gh_pat},
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            out, _ = await proc.communicate()
-            return bool(out.decode(errors="replace").strip())
+            await self._limiter.reserve(points=1, method="GET", max_wait=15)
+            async with httpx.AsyncClient(timeout=DISPATCH_TIMEOUT) as client:
+                resp = await client.get(
+                    url, params={"status": "in_progress", "per_page": 1},
+                    headers=self._gh_headers(),
+                )
+            return bool((resp.json().get("total_count") or 0) > 0)
         except Exception:
             return False
 

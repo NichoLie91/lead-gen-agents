@@ -17,7 +17,9 @@ NOT_CONFIGURED and every tool call raises ``ComposioNotConfigured``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 
 import httpx
 
@@ -27,6 +29,25 @@ log = logging.getLogger(__name__)
 
 V3_BASE = "https://backend.composio.dev/api/v3"
 EXECUTE_TIMEOUT = 90.0
+
+# Retry/backoff on throttles (spec 7.x): Composio surfaces Google API quota
+# errors as HTTP 429 / 5xx, transport failures, or a ``successful: false`` body
+# whose message mentions quota/rate limits. We sleep 2-5s first, then back off
+# exponentially (2, 4, 8, 16s + jitter) up to a 60s ceiling.
+RETRY_MAX_ATTEMPTS = 5       # 1 fast try + up to 4 retries
+RETRY_BASE_SEC = 2.0
+RETRY_MAX_SEC = 60.0
+
+# Substrings that mark a failure as transient (safe to retry). Semantic errors
+# like "Sheet Pipeline not found" are NOT retried - retrying would just burn
+# quota. HTTP 429/5xx are handled at the response level; here we only match
+# body-level throttle phrases (no bare digits, which would false-positive on
+# semantic errors that happen to contain numbers).
+RETRYABLE_HINTS = (
+    "quota", "rate limit", "rate_limit", "resource_exhausted", "too many",
+    "temporarily unavailable", "server error", "internal error", "timeout",
+    "deadline exceeded", "connection reset", "connection refused",
+)
 
 # Slug resolution table (spec 6.2): purpose -> candidate action slugs.
 # Verified against the live v3 catalog (2026-08): the googlesheets toolkit has
@@ -184,6 +205,47 @@ class ComposioAgent:
             return {c: "ERROR" for c in statuses}
 
     # ---------- tool execution (v3 REST) ----------
+    async def _execute_once(self, action: str, body: dict) -> tuple[dict, bool]:
+        """One raw execute attempt -> (result_dict, retryable_flag)."""
+        try:
+            async with httpx.AsyncClient(timeout=EXECUTE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{V3_BASE}/tools/execute/{action}",
+                    json=body, headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "action": action, "error": str(exc)}, True
+
+        if resp.status_code == 429 or resp.status_code >= 500:
+            return (
+                {"ok": False, "action": action,
+                 "error": f"HTTP {resp.status_code}: {resp.text[:200]}"},
+                True,
+            )
+        if resp.status_code != 200:
+            return (
+                {"ok": False, "action": action, "error": resp.text[:300]},
+                False,
+            )
+        payload = resp.json()
+        # Composio returns HTTP 200 even when the action itself failed; the
+        # failure is signalled by the body's ``successful`` flag (or an embedded
+        # ``http_error``). Treat those as failures (verified against v3 API).
+        if payload.get("successful") is False:
+            err = str(payload.get("error") or payload.get("message") or "")[:300]
+            return {"ok": False, "action": action, "error": err}, self._is_retryable(err)
+        data = payload.get("data", payload)
+        if isinstance(data, dict) and "http_error" in data:
+            err = str(data)[:300]
+            return {"ok": False, "action": action, "error": err}, self._is_retryable(err)
+        return {"ok": True, "action": action, "data": data}, False
+
+    @staticmethod
+    def _is_retryable(error_text: str) -> bool:
+        """True when an error smells like a throttle/server hiccup."""
+        lowered = error_text.lower()
+        return any(hint in lowered for hint in RETRYABLE_HINTS)
+
     async def execute_action(self, action: str, params: dict) -> dict:
         if not self.connected:
             raise ComposioNotConfigured(f"{action} requires COMPOSIO_API_KEY")
@@ -198,32 +260,24 @@ class ComposioAgent:
         if toolkit and account_id:
             body["connected_account_id"] = account_id
 
-        try:
-            async with httpx.AsyncClient(timeout=EXECUTE_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{V3_BASE}/tools/execute/{action}",
-                    json=body, headers=self._headers(),
-                )
-        except httpx.HTTPError as exc:
-            log.error("Composio action %s transport error: %s", action, exc)
-            return {"ok": False, "action": action, "error": str(exc)}
-
-        if resp.status_code != 200:
-            log.error("Composio action %s failed: %s", action, resp.text[:300])
-            return {"ok": False, "action": action, "error": resp.text[:300]}
-        payload = resp.json()
-        # Composio returns HTTP 200 even when the action itself failed; the
-        # failure is signalled by the body's ``successful`` flag (or an embedded
-        # ``http_error``). Treat those as failures (verified against v3 API).
-        if payload.get("successful") is False:
-            err = payload.get("error") or payload.get("message") or ""
-            log.error("Composio action %s failed: %s", action, str(err)[:300])
-            return {"ok": False, "action": action, "error": str(err)[:300]}
-        data = payload.get("data", payload)
-        if isinstance(data, dict) and "http_error" in data:
-            log.error("Composio action %s failed: %s", action, str(data)[:300])
-            return {"ok": False, "action": action, "error": str(data)[:300]}
-        return {"ok": True, "action": action, "data": data}
+        for attempt in range(RETRY_MAX_ATTEMPTS):
+            result, retryable = await self._execute_once(action, body)
+            if result.get("ok") or not retryable or attempt == RETRY_MAX_ATTEMPTS - 1:
+                if not result.get("ok") and attempt > 0:
+                    log.error(
+                        "Composio action %s failed after %d attempt(s): %s",
+                        action, attempt + 1, result.get("error", ""),
+                    )
+                return result
+            # Exponential backoff with jitter: 2s first, then 4, 8, 16... (cap 60s).
+            delay = min(RETRY_MAX_SEC, RETRY_BASE_SEC * (2 ** attempt))
+            delay += random.uniform(0, 0.5 * delay)
+            log.warning(
+                "Composio action %s throttled (attempt %d/%d); sleeping %.1fs: %s",
+                action, attempt + 1, RETRY_MAX_ATTEMPTS, delay,
+                result.get("error", ""),
+            )
+            await asyncio.sleep(delay)
 
     # ---------- higher-level tools ----------
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:

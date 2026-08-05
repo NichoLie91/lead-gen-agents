@@ -40,6 +40,9 @@ jobs:
       - name: Poll Telegram & dispatch commands
         run: python -m src.bot.telegram_bot
         env:
+          # REST dispatch target: owner/repo + branch (github_agent.py)
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}   # /status may read the sheet

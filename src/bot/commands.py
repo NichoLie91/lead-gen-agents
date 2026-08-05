@@ -77,6 +77,9 @@ def format_status(report: dict | None, sheet_url: str, running: bool) -> str:
             f"IG: sent={metrics.get('ig_sent', 0)} skipped={metrics.get('ig_skipped', 0)}"
         )
         lines.append(f"Needs enrichment: {metrics.get('needs_enrichment', 0)}")
+        if metrics.get("sheet_tabs_failed"):
+            lines.append(f"⚠️ Sheet write FAILED for {metrics['sheet_tabs_failed']} tab(s) "
+                         f"({metrics.get('sheet_tabs_written', 0)} ok)")
     if sheet_url:
         lines.append(f"Sheet: {sheet_url}")
     return "\n".join(lines)

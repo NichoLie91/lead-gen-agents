@@ -119,6 +119,13 @@ def _sheet_url(settings: Settings) -> str:
 
 # ---------- single poll pass ----------
 async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) -> int:
+    """Fetch + process ONE batch of updates, then return.
+
+    Deliberately NOT an infinite loop: each poll pass is a short-lived job
+    (bot-poll.yml runs every 5 minutes), so after the batch is processed we
+    exit cleanly. One broken update (e.g. a GitHub 403 reply) is caught and
+    skipped so it can never abort the whole pass.
+    """
     token = settings.telegram_bot_token
     if not token:
         log.error("TELEGRAM_BOT_TOKEN not set")
@@ -130,7 +137,10 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
         update_id = int(update.get("update_id", 0))
         if update_id <= offset:
             continue
-        await handle_update(update, settings, state, github)
+        try:
+            await handle_update(update, settings, state, github)
+        except Exception:  # never let one update crash the batch
+            log.exception("update %s failed", update_id)
         offset = max(offset, update_id)
         processed += 1
     if processed:
@@ -149,8 +159,10 @@ async def main() -> int:
         )
     state = StateStore(settings.state_dir)
     github = GitHubAgent(settings, state)
+    # Single pass: process whatever batch is pending, persist the offset, then
+    # exit — no tight polling loop, so the Actions job always terminates.
     processed = await poll_once(settings, state, github)
-    log.info("poll pass finished; processed %d update(s)", processed)
+    log.info("poll pass finished; processed %d update(s); exiting", processed)
     return 0
 
 
