@@ -98,10 +98,13 @@ class SheetsAgent:
 
     # ---------- lifecycle ----------
     async def ensure_sheet(self) -> str:
-        """Return the primary (Pipeline) spreadsheet id, creating one
-        spreadsheet per tab on first use. Offline -> mirror id."""
-        if self._sheet_id and "Pipeline" in self._sheet_ids:
-            return self._sheet_id
+        """Return the primary (Pipeline) spreadsheet id, creating a spreadsheet
+        for every tab that doesn't have one yet. Offline -> mirror id.
+
+        No early return when the primary exists: tabs added later (e.g. CRM)
+        must be backfilled on the next run, or their writes get skipped with
+        "no spreadsheet for tab" in flush().
+        """
         if not self._composio.connected or self._settings.dry_run:
             self._sheet_id = "DRY-RUN-MIRROR"
             self._init_mirror()
@@ -184,11 +187,35 @@ class SheetsAgent:
         return bool(self._pending_writes)
 
     # ---------- writes (queued; flush() applies them at the end of a run) ----------
+    @staticmethod
+    def _sanitize_cell(value) -> str | int | float:
+        """Coerce cells to types the GOOGLESHEETS_BATCH_UPDATE tool accepts.
+
+        Composio validates every cell as ``string | integer | number``; a
+        ``None`` (e.g. ``lead.get("email")`` when the key exists with a None
+        value) or a bool rejects the ENTIRE tab write ("Invalid request data
+        provided" -> empty sheet). Keep scalar types, blank out None, and
+        stringify anything exotic.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (str, int, float)):
+            return value
+        return str(value)
+
+    @classmethod
+    def _sanitize_rows(cls, rows: list[list]) -> list[list]:
+        return [[cls._sanitize_cell(cell) for cell in row] for row in rows]
+
     async def write_tab(self, tab: str, rows: list[list]) -> bool:
         """Queue a full-tab rewrite. No API call happens here — flush() applies
-        all queued writes once, at the end of the run (avoids quota bursts)."""
+        all queued writes once, at the end of the run (avoids quota bursts).
+        Cells are sanitized so a None/bool can never kill the whole tab write.
+        """
         header = HEADERS.get(tab, [])
-        values = [header] + rows
+        values = [header] + self._sanitize_rows(rows)
         self._pending_writes[tab] = values
         # Offline/dry-run: mirror immediately so read_tab sees the same data.
         if not self._composio.connected or self._settings.dry_run:

@@ -65,3 +65,45 @@ def test_flush_applies_all_pending_and_clears_queue(tmp_path):
 def test_flush_with_no_pending_is_noop(tmp_path):
     sheets, _, _ = make_sheets(tmp_path)
     assert asyncio.run(sheets.flush()) == (0, 0)
+
+
+def test_write_tab_sanitizes_none_and_bool_cells(tmp_path):
+    # Regression: a None cell (lead.get("email") with key present but value
+    # None) used to reject the ENTIRE GOOGLESHEETS_BATCH_UPDATE call with
+    # "Invalid request data provided" -> empty Pipeline tab in the live sheet.
+    sheets, _, _ = make_sheets(tmp_path)
+    asyncio.run(sheets.write_tab("Pipeline", [["Biz A", None, True, False, 1.5]]))
+    rows = asyncio.run(sheets.read_tab("Pipeline"))
+    assert rows[1] == ["Biz A", "", "TRUE", "FALSE", 1.5]
+
+
+def test_ensure_sheet_backfills_tabs_created_later(tmp_path):
+    # Regression: ensure_sheet used to early-return when the Pipeline sheet
+    # existed, so tabs added later (CRM) were never created and flush() logged
+    # "no spreadsheet for tab CRM; skipping live write".
+    class FakeComposio:
+        connected = True
+        def __init__(self):
+            self.created: list[str] = []
+        def slug(self, name: str) -> str:
+            return name
+        async def execute_action(self, slug: str, args: dict) -> dict:
+            if slug == "sheet_create_named":
+                tab = args["sheet_name"]
+                self.created.append(tab)
+                return {"ok": True,
+                        "data": {"response_data": {"spreadsheetId": f"sid-{tab}"}}}
+            return {"ok": False, "error": "unexpected call"}
+
+    fake = FakeComposio()
+    settings = Settings(dry_run=False, repo_root=tmp_path)
+    state = StateStore(tmp_path / "state")
+    state.save("sheet_ids", {"Pipeline": "sid-pipeline"})
+    settings.google_sheet_id = "sid-pipeline"
+    sheets = SheetsAgent(fake, settings, state)
+
+    assert asyncio.run(sheets.ensure_sheet()) == "sid-pipeline"
+    # Every tab missing from the persisted ids gets backfilled.
+    assert fake.created == ["Score", "Outreach", "Followup", "CRM"]
+    assert sheets._tab_sheet_id("CRM") == "sid-CRM"
+    assert state.load("sheet_ids", {}).get("CRM") == "sid-CRM"
