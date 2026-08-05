@@ -12,3 +12,6 @@ ignore = ["BLE001"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Make `import src` resolve regardless of how pytest is invoked (CI runs plain
+# `pytest -q`, where the repo root is not on sys.path by default).
+pythonpath = ["."]
