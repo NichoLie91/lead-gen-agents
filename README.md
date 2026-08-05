@@ -47,8 +47,8 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
 - **Secrets** (GitHub Actions secrets; see `.env.example` for names):
   `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `GH_PAT` (fine-grained, Contents
   read/write + Actions + Workflows), `COMPOSIO_API_KEY`, `GOOGLE_SHEET_ID`.
-- **Composio connections**: `googlesheets` + `gmail` (ACTIVE for
-  nicholas98.thebest@gmail.com), `instagram` (connect a Meta Business account).
+- **Composio connections**: `googlesheets` + `gmail` (ACTIVE for your
+  connected Google account), `instagram` (connect a Meta Business account).
 - **Gemini**: `gemini-2.5-flash` needs a billing-enabled (Tier 1) project for
   bulk drafting — free tier is ~20 requests/day.
 

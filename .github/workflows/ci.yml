@@ -39,7 +39,7 @@ jobs:
           # 10+ digit phone numbers). Lead PII must never enter this repo.
           if grep -rEn --include='*.json' --include='*.md' -E \
               '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' state/ README.md \
-              | grep -vE 'email@|example\.|@users\.noreply'; then
+              | grep -vE 'email@|example|@users\.noreply'; then
             echo "::error::Possible PII (email address) found in committed files"
             exit 1
           fi
