@@ -69,7 +69,8 @@ SLUG_ALIASES: dict[str, list[str]] = {
     "sheet_read": ["GOOGLESHEETS_BATCH_GET"],
     "maps_search": ["GOOGLE_MAPS_TEXT_SEARCH", "SERPAPI_GOOGLE_MAPS_SEARCH",
                      "ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH"],
-    "web_search": ["TAVILY_TAVILY_SEARCH", "SERPER_GOOGLE_SEARCH"],
+    "web_search": ["TAVILY_TAVILY_SEARCH", "SERPAPI_SEARCH",
+                     "SERPAPI_GOOGLE_LIGHT_SEARCH", "SERPER_GOOGLE_SEARCH"],
     "fetch_url": ["COMPOSIO_SEARCH_FETCH_URL_CONTENT"],
     "ig_send_dm": ["INSTAGRAM_SEND_TEXT_MESSAGE"],
     "multi_execute": ["COMPOSIO_MULTI_EXECUTE_TOOL"],
@@ -333,7 +334,10 @@ class ComposioAgent:
         return out
 
     async def search_web(self, query: str) -> list[dict]:
-        resp = await self.execute_action(self.slug("web_search"), {"query": query})
+        # Tavily takes ``query``; SerpAPI takes ``q`` (catalog-verified).
+        slug = self.slug("web_search")
+        params = {"q": query} if "SERPAPI" in slug.upper() else {"query": query}
+        resp = await self.execute_action(slug, params)
         return resp.get("data", []) if resp.get("ok") else []
 
     async def fetch_url(self, url: str) -> str:
