@@ -46,7 +46,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}   # /status may read the sheet
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}       # /status summary may use LLM
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}       # free-text intent brain + LLM features
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}              # repo variable, default gemini-flash-latest
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
           TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}

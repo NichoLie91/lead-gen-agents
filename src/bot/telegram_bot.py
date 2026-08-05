@@ -13,8 +13,10 @@ import httpx
 
 from src.agents.github_agent import GitHubAgent
 from src.approvals import ApprovalQueue
+from src.bot.ai import RUN_MODES, classify_intent
 from src.bot.commands import build_help, format_status, is_allowed, parse_command
 from src.core.config import Settings
+from src.core.llm import GeminiClient
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -108,12 +110,108 @@ def _chunk(text: str, size: int) -> list[str]:
 
 
 # ---------- command dispatch ----------
+async def _dispatch_command(
+    command: str,
+    args: str,
+    user_id: int,
+    settings: Settings,
+    state: StateStore,
+    github: GitHubAgent,
+) -> str:
+    """Execute one whitelisted command; returns the reply text. Shared by the
+    exact-slash fast path AND the Gemini brain (which may map free text to
+    any of these commands — the whitelist lives in commands.py)."""
+    if command == "/help":
+        return build_help()
+    if command == "/id":
+        return f"Your Telegram user ID: {user_id}"
+    if command == "/status":
+        report = state.load("last_run")
+        running = bool(state.get("pipeline_running", "running", False))
+        return format_status(report, _sheet_url(settings), running)
+    if command == "/sheet":
+        return _sheet_url(settings)
+    if command == "/run":
+        if await github.pipeline_in_progress():
+            return "A pipeline run is already in progress. Use /status or /stop."
+        mode = (args or "full").strip().lower()
+        if mode not in RUN_MODES:  # custom modes (e.g. "run discovery") route here
+            mode = "full"
+        return await github.trigger_pipeline(mode)
+    if command == "/send all email":
+        return await github.trigger_pipeline("outreach-email")
+    if command == "/send all instagram":
+        return await github.trigger_pipeline("outreach-ig")
+    if command == "/stop":
+        github.set_stop()
+        return "Stop flag set. The running pipeline will halt between stages."
+    if command == "/list drafts":
+        return await _list_drafts(settings, state)
+    if command == "/approve":
+        return _approve_drafts(args, state)
+    if command == "/reject":
+        return _reject_drafts(args, state)
+    if command == "/reject all":
+        return _reject_drafts("all", state)
+    if command == "/inbound":
+        return await github.trigger_pipeline("inbound")
+    if command == "/followups":
+        return await github.trigger_pipeline("followups")
+    return "Unknown command. Send /help."
+
+
+def _intent_context(settings: Settings, state: StateStore) -> str:
+    """PII-safe context snippet for Gemini: last-run metrics, running state,
+    draft count. No lead data ever (spec 11)."""
+    report = state.load("last_run")
+    running = bool(state.get("pipeline_running", "running", False))
+    head = format_status(report, _sheet_url(settings), running)
+    try:
+        pending = len(ApprovalQueue(state).pending())
+    except Exception:
+        pending = 0
+    return f"{head}\nDrafts awaiting approval: {pending}"
+
+
+async def _handle_free_text(
+    text: str,
+    settings: Settings,
+    state: StateStore,
+    github: GitHubAgent,
+    user_id: int = 0,
+    llm: GeminiClient | None = None,
+) -> str:
+    """Route any non-command message through the Gemini intent brain: custom
+    requests, questions about the system, and unknown /commands all land here.
+    Falls back to a safe message when Gemini is unavailable or unsure."""
+    if llm is None:
+        llm = GeminiClient(settings.gemini_api_key, settings.gemini_model)
+    if not llm.available:
+        return ("I only understand the listed /commands right now (no Gemini "
+                "key configured) — send /help to see them.")
+    intent = await classify_intent(llm, text, _intent_context(settings, state))
+    if intent.get("action") == "unavailable":
+        return ("⚠️ Gemini is busy right now (temporary API hiccup). "
+                "Try again in a minute, or use a /command directly.")
+    if not intent:
+        return ("I couldn't map that to an action. Send /help, or rephrase — "
+                "e.g. \"run the pipeline\", \"approve all drafts\", "
+                "\"how did the last run go?\"")
+    if intent.get("action") == "command":
+        return await _dispatch_command(intent["command"], intent.get("args", ""),
+                                       user_id, settings, state, github)
+    return intent.get("text") or "👍"
+
+
 async def handle_update(
     update: dict,
     settings: Settings,
     state: StateStore,
     github: GitHubAgent,
 ) -> None:
+    """Process one update. Exact slash commands take the deterministic fast
+    path; everything else (plain English, questions, unknown /commands) goes
+    through the Gemini brain so the bot understands custom requests too."""
     message = update.get("message") or {}
     chat_id = message.get("chat", {}).get("id")
     user_id = message.get("from", {}).get("id")
@@ -124,57 +222,12 @@ async def handle_update(
         log.info("ignoring message from unauthorized user %s", user_id)
         return
 
-    command, _args = parse_command(text)
-    if not command:
-        return
-
-    if command == "/help":
-        await send_message(settings.telegram_bot_token, chat_id, build_help())
-    elif command == "/id":
-        await send_message(settings.telegram_bot_token, chat_id, f"Your Telegram user ID: {user_id}")
-    elif command == "/status":
-        report = state.load("last_run")
-        running = bool(state.get("pipeline_running", "running", False))
-        sheet_url = _sheet_url(settings)
-        await send_message(settings.telegram_bot_token, chat_id,
-                           format_status(report, sheet_url, running))
-    elif command == "/sheet":
-        await send_message(settings.telegram_bot_token, chat_id, _sheet_url(settings))
-    elif command == "/run":
-        if await github.pipeline_in_progress():
-            await send_message(settings.telegram_bot_token, chat_id,
-                               "A pipeline run is already in progress. Use /status or /stop.")
-            return
-        reply = await github.trigger_pipeline("full")
-        await send_message(settings.telegram_bot_token, chat_id, reply)
-    elif command == "/send all email":
-        reply = await github.trigger_pipeline("outreach-email")
-        await send_message(settings.telegram_bot_token, chat_id, reply)
-    elif command == "/send all instagram":
-        reply = await github.trigger_pipeline("outreach-ig")
-        await send_message(settings.telegram_bot_token, chat_id, reply)
-    elif command == "/stop":
-        github.set_stop()
-        await send_message(settings.telegram_bot_token, chat_id,
-                           "Stop flag set. The running pipeline will halt between stages.")
-    elif command == "/list drafts":
-        await send_message(settings.telegram_bot_token, chat_id,
-                           await _list_drafts(settings, state))
-    elif command == "/approve":
-        await send_message(settings.telegram_bot_token, chat_id,
-                           _approve_drafts(_args, state))
-    elif command == "/reject":
-        await send_message(settings.telegram_bot_token, chat_id,
-                           _reject_drafts(_args, state))
-    elif command == "/reject all":
-        await send_message(settings.telegram_bot_token, chat_id,
-                           _reject_drafts("all", state))
-    elif command == "/inbound":
-        reply = await github.trigger_pipeline("inbound")
-        await send_message(settings.telegram_bot_token, chat_id, reply)
-    elif command == "/followups":
-        reply = await github.trigger_pipeline("followups")
-        await send_message(settings.telegram_bot_token, chat_id, reply)
+    command, args = parse_command(text)
+    if command:
+        reply = await _dispatch_command(command, args, user_id, settings, state, github)
+    else:
+        reply = await _handle_free_text(text, settings, state, github, user_id=user_id)
+    await send_message(settings.telegram_bot_token, chat_id, reply)
 
 
 def _sheet_url(settings: Settings) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 COMMAND_HELP = {
     "/help": "Show available commands",
     "/status": "Latest execution report & metrics (how the last run did)",
-    "/run": "Trigger an immediate pipeline run",
+    "/run": "Trigger an immediate pipeline run: /run, or /run <mode> (full | discovery | enrichment | outreach-email | outreach-ig | followups | inbound | report)",
     "/list drafts": "List WARM drafts waiting for your approval",
     "/approve": "Approve drafts: /approve all, or /approve <id> from /list drafts",
     "/reject": "Reject drafts: /reject all, or /reject <id>",
@@ -48,6 +48,10 @@ def build_help() -> str:
     lines = ["Available commands:"]
     for cmd, desc in COMMAND_HELP.items():
         lines.append(f"{cmd} — {desc}")
+    lines.append("")
+    lines.append("💬 You can also just type what you want in plain English — "
+                 "e.g. \"run the pipeline\", \"send the follow-ups\", "
+                 "\"approve all drafts\", \"what happened last run?\".")
     return "\n".join(lines)
 
 

@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 
 class GeminiClient:
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-flash-latest"):
         self._api_key = api_key
         self._model = model
         self._client = None
@@ -32,7 +32,12 @@ class GeminiClient:
         if not self._client:
             return ""
         try:
-            resp = await self._client.models.generate_content(
+            # In google-genai (>=1.x), client.models.generate_content is SYNC
+            # and client.aio.models.generate_content is the awaitable variant.
+            # The pipeline awaits complete() everywhere, so call through the
+            # aio client — awaiting the sync call used to raise TypeError and
+            # silently fall back to templates.
+            resp = await self._client.aio.models.generate_content(
                 model=self._model,
                 contents=prompt,
             )

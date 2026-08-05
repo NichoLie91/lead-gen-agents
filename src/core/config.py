@@ -47,7 +47,10 @@ class Settings:
     # --- secrets (empty when absent -> components run offline) ---
     telegram_bot_token: str = ""
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    # gemini-flash-latest is an always-current alias; gemini-2.5-flash now
+    # returns 404 for new keys (2026-08). Pin a versioned model via
+    # GEMINI_MODEL when you need reproducibility.
+    gemini_model: str = "gemini-flash-latest"
     composio_api_key: str = ""
     gh_pat: str = ""
     google_sheet_id: str = ""
@@ -70,7 +73,9 @@ class Settings:
         settings = cls(
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             gemini_api_key=env.get("GEMINI_API_KEY", ""),
-            gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            # `or` guard: Actions sets GEMINI_MODEL to "" when the repo
+            # variable is unset, which env.get(default) would not catch.
+            gemini_model=(env.get("GEMINI_MODEL") or "gemini-flash-latest"),
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),
