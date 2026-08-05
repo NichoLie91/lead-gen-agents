@@ -1,0 +1,53 @@
+name: inbound
+
+# AI employee loop: scan email for lead replies, classify them (Gemini +
+# keyword fallback) and act — STOP gets an auto opt-out confirmation, and
+# INTERESTED / PRICE_OBJECTION / QUESTION get escalated to the owner on
+# Telegram with a suggested response. Runs every 2 hours.
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:           # manual scan for debugging
+
+concurrency:
+  group: pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  GH_TOKEN: ${{ secrets.GH_PAT }}
+
+jobs:
+  run-inbound:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scan lead replies (mode=inbound)
+        run: python -m src.pipeline --mode inbound
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}

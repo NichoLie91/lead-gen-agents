@@ -1,7 +1,7 @@
 {
-  "run_id": "7fc50d2f",
+  "run_id": "456a6511",
   "mode": "discovery",
-  "started_at": "2026-08-05T10:31:51.597461+00:00",
+  "started_at": "2026-08-05T11:07:35.843887+00:00",
   "status": "COMPLETED",
   "metrics": {
     "candidates": 60,
@@ -11,8 +11,8 @@
       "HOT-VERIFIED": 8,
       "WARM": 51
     },
-    "sheet_tabs_written": 1,
+    "sheet_tabs_written": 2,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-05T10:31:51.623463+00:00"
+  "finished_at": "2026-08-05T11:07:35.869888+00:00"
 }

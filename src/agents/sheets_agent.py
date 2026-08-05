@@ -32,7 +32,7 @@ from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
 
-TABS = ("Pipeline", "Score", "Outreach", "Followup")
+TABS = ("Pipeline", "Score", "Outreach", "Followup", "CRM")
 
 PIPELINE_HEADER = [
     "#", "Lead", "Category", "City-State", "Phone", "Email", "Website",
@@ -41,14 +41,31 @@ PIPELINE_HEADER = [
 ]
 SCORE_HEADER = ["Lead", "ICP (0-25)", "Intent (0-25)", "Budget (0-20)",
                 "Reachability (0-15)", "Timing (0-15)", "Total", "Tier"]
-OUTREACH_HEADER = ["#", "Lead", "Channel", "Subject", "Body", "Status", "Send Date"]
+# "Lead ID" is the PII-safe sha256 (src/core/ident.py) so approvals match
+# drafts without exposing lead data in the repo; Email/Subject/Body live only
+# in this private sheet.
+OUTREACH_HEADER = ["#", "Lead", "Lead ID", "Email", "Channel", "Subject",
+                   "Body", "Status", "Send Date"]
 FOLLOWUP_HEADER = ["#", "Lead", "Step 1", "Step 2", "Step 3", "Step 4", "Status"]
+
+# Long-term lead memory (Step 06). Timeline holds a JSON array of
+# {ts, event, detail} entries — the per-lead conversation log. All of it stays
+# in the private sheet; the public repo only ever sees lead_id hashes.
+CRM_HEADER = [
+    "Lead ID", "Name", "Email", "Instagram", "Tier", "Status", "Last Contact",
+    "Next Follow-up", "Follow-ups Sent", "Last Reply", "Timeline", "Notes",
+]
+CRM_STATUSES = (
+    "NEW", "DRAFTED", "CONTACTED", "REPLIED-INTERESTED", "OBJECTION",
+    "QUESTION", "UNSUBSCRIBED", "WON", "LOST",
+)
 
 HEADERS = {
     "Pipeline": PIPELINE_HEADER,
     "Score": SCORE_HEADER,
     "Outreach": OUTREACH_HEADER,
     "Followup": FOLLOWUP_HEADER,
+    "CRM": CRM_HEADER,
 }
 
 # Pause between live tab writes so bursts of clear+update calls stay well under

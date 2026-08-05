@@ -20,6 +20,25 @@ def test_parse_with_extra_text():
     assert args == "tonight"
 
 
+def test_parse_approve_with_id():
+    cmd, args = parse_command("/approve a1b2c3d4")
+    assert cmd == "/approve"
+    assert args == "a1b2c3d4"
+    cmd, args = parse_command("/approve all")
+    assert cmd == "/approve"
+    assert args == "all"
+    cmd, args = parse_command("/reject a1b2c3d4")
+    assert cmd == "/reject"
+    assert args == "a1b2c3d4"
+
+
+def test_parse_new_commands():
+    assert parse_command("/list drafts") == ("/list drafts", "")
+    assert parse_command("/reject all") == ("/reject all", "")
+    assert parse_command("/inbound") == ("/inbound", "")
+    assert parse_command("/followups") == ("/followups", "")
+
+
 def test_parse_unknown():
     assert parse_command("/nonsense") == ("", "")
     assert parse_command("hello there") == ("", "")
@@ -35,7 +54,8 @@ def test_allow_list():
 def test_help_lists_all_commands():
     help_text = build_help()
     for cmd in ("/run", "/status", "/stop", "/approve", "/reject all",
-                "/send all email", "/send all instagram", "/sheet", "/id"):
+                "/send all email", "/send all instagram", "/sheet", "/id",
+                "/list drafts", "/reject", "/inbound", "/followups"):
         assert cmd in help_text
 
 

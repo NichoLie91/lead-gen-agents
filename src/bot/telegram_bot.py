@@ -12,6 +12,7 @@ import logging
 import httpx
 
 from src.agents.github_agent import GitHubAgent
+from src.approvals import ApprovalQueue
 from src.bot.commands import build_help, format_status, is_allowed, parse_command
 from src.core.config import Settings
 from src.core.state import StateStore
@@ -19,6 +20,60 @@ from src.core.state import StateStore
 log = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org"
+
+
+# ---------- approval helpers (Step 04: human-in-the-loop) ----------
+def _approve_drafts(args: str, state: StateStore) -> str:
+    queue = ApprovalQueue(state)
+    if args and args.lower() != "all":
+        if queue.decide(args, "approved"):
+            return f"✅ Approved draft {args[:8]}. It sends on the next /send all email."
+        return f"No pending draft matches '{args[:16]}'. Try /list drafts."
+    count = queue.decide_all("approved")
+    if count:
+        return f"✅ Approved {count} draft(s). They send on the next /send all email."
+    return "No drafts waiting for approval. WARM drafts appear after an outreach run."
+
+
+def _reject_drafts(args: str, state: StateStore) -> str:
+    queue = ApprovalQueue(state)
+    if args and args.lower() != "all":
+        if queue.decide(args, "rejected"):
+            return f"🚫 Rejected draft {args[:8]}."
+        return f"No pending draft matches '{args[:16]}'. Try /list drafts."
+    count = queue.decide_all("rejected")
+    if count:
+        return f"🚫 Rejected {count} draft(s)."
+    return "No drafts waiting for approval."
+
+
+async def _list_drafts(settings: Settings, state: StateStore) -> str:
+    queue = ApprovalQueue(state)
+    pending = queue.pending()
+    if not pending:
+        return "No drafts waiting for approval. WARM leads become drafts after an outreach run."
+    names: dict[str, str] = {}
+    try:
+        # Enrich with lead names from the private sheet (bot has Composio creds).
+        from src.agents.composio_agent import ComposioAgent
+        from src.agents.sheets_agent import SheetsAgent
+
+        sheets = SheetsAgent(ComposioAgent(settings), settings, state)
+        raw = await sheets.read_tab("Outreach")
+        if raw and raw[0]:
+            header = [str(h).strip() for h in raw[0]]
+            lid_i = header.index("Lead ID") if "Lead ID" in header else None
+            name_i = header.index("Lead") if "Lead" in header else None
+            for row in raw[1:]:
+                if lid_i is not None and lid_i < len(row):
+                    names[row[lid_i]] = row[name_i] if (name_i is not None and name_i < len(row)) else ""
+    except Exception as exc:
+        log.warning("list drafts sheet lookup failed: %s", exc)
+    lines = ["Drafts awaiting approval:"]
+    for lid in pending[:20]:
+        lines.append(f"• `{lid[:8]}`  {names.get(lid, '')}")
+    lines.append("\n/approve all — or /approve <id> · /reject <id> · /reject all")
+    return "\n".join(lines)
 
 
 # ---------- low-level Telegram API ----------
@@ -102,13 +157,24 @@ async def handle_update(
         github.set_stop()
         await send_message(settings.telegram_bot_token, chat_id,
                            "Stop flag set. The running pipeline will halt between stages.")
-    elif command in ("/approve", "/reject", "/reject all"):
-        # v1: recorded in state; actual draft approval applies on the next
-        # outreach-email run (spec 5.1).
-        state.set("review", "decision", command)
+    elif command == "/list drafts":
         await send_message(settings.telegram_bot_token, chat_id,
-                           f"{command} recorded. Warm drafts will follow this decision "
-                           f"on the next /send all email.")
+                           await _list_drafts(settings, state))
+    elif command == "/approve":
+        await send_message(settings.telegram_bot_token, chat_id,
+                           _approve_drafts(_args, state))
+    elif command == "/reject":
+        await send_message(settings.telegram_bot_token, chat_id,
+                           _reject_drafts(_args, state))
+    elif command == "/reject all":
+        await send_message(settings.telegram_bot_token, chat_id,
+                           _reject_drafts("all", state))
+    elif command == "/inbound":
+        reply = await github.trigger_pipeline("inbound")
+        await send_message(settings.telegram_bot_token, chat_id, reply)
+    elif command == "/followups":
+        reply = await github.trigger_pipeline("followups")
+        await send_message(settings.telegram_bot_token, chat_id, reply)
 
 
 def _sheet_url(settings: Settings) -> str:
@@ -162,6 +228,12 @@ async def main() -> int:
     # Single pass: process whatever batch is pending, persist the offset, then
     # exit — no tight polling loop, so the Actions job always terminates.
     processed = await poll_once(settings, state, github)
+    # Commit + push state (approvals decisions, telegram_offset) so the next
+    # ephemeral job — and the pipeline — actually sees them. Without this, the
+    # files written here vanish when the job ends and /approve would never
+    # reach the outreach run.
+    if processed and github.commit_state():
+        log.info("state committed to repo")
     log.info("poll pass finished; processed %d update(s); exiting", processed)
     return 0
 

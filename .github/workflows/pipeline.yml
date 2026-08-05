@@ -14,6 +14,8 @@ on:
           - enrichment      # re-run enrichment for NEEDS_ENRICHMENT / NEEDS_VERIFICATION rows
           - outreach-email  # send HOT (auto) + approved WARM emails (respects 50/run cap)
           - outreach-ig     # send IG DMs (respects 15/24h cap + Meta rules)
+          - followups       # AI employee loop: send due Day 3/7/14 follow-ups
+          - inbound         # AI employee loop: scan email for lead replies
           - report          # regenerate last-run report + notify via Telegram
         default: full
 

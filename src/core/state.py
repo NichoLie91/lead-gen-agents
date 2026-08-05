@@ -15,6 +15,7 @@ Files:
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -23,7 +24,12 @@ from typing import Any
 
 
 class StateStore:
-    """Load/save JSON state files atomically, with change detection."""
+    """Load/save JSON state files atomically, with change detection.
+
+    load()/save() deep-copy: callers can never mutate the cache in place,
+    which would otherwise make save_if_changed() see "no diff" and silently
+    drop the write (a class of bug that broke approvals/offset persistence).
+    """
 
     def __init__(self, root: Path | str):
         self.root = Path(root)
@@ -37,20 +43,20 @@ class StateStore:
 
     def load(self, name: str, default: Any = None) -> Any:
         if name in self._cache:
-            return self._cache[name]
+            return copy.deepcopy(self._cache[name])
         p = self.path(name)
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 self._cache[name] = data
-                return data
+                return copy.deepcopy(data)
             except (json.JSONDecodeError, OSError):
                 pass
         self._cache[name] = default
-        return default
+        return copy.deepcopy(default)
 
     def save(self, name: str, data: Any) -> None:
-        self._cache[name] = data
+        self._cache[name] = copy.deepcopy(data)
         p = self.path(name)
         fd, tmp = tempfile.mkstemp(dir=str(self.root), suffix=".tmp")
         try:
@@ -83,8 +89,10 @@ class StateStore:
         return data.get(key, default)
 
     def set(self, name: str, key: str, value: Any) -> bool:
+        # Copy before mutating: load() returns the CACHED object, and mutating
+        # it in place would make save_if_changed() see no diff and skip the
+        # write (the aliasing bug that silently broke persistence).
         data = self.load(name, {})
-        if not isinstance(data, dict):
-            data = {}
+        data = dict(data) if isinstance(data, dict) else {}
         data[key] = value
         return self.save_if_changed(name, data)
