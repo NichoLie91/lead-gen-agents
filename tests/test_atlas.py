@@ -1,10 +1,11 @@
-"""Atlas discovery filter tests (spec 7.2)."""
+"""Atlas discovery filter tests (spec 7.2 + job doc 1 target gates)."""
 from src.agents.atlas import (
     dedupe,
     flag_in_pool_chains,
     has_any_contact,
     is_chain,
     is_closed,
+    passes_target_gate,
 )
 
 
@@ -48,3 +49,15 @@ def test_in_pool_chain_flag():
     chains = flag_in_pool_chains(leads)
     assert "dental smiles" in chains
     assert "local shop" not in chains
+
+
+def test_target_gate_requires_4_4_stars():
+    """Job doc 1: target businesses are 4.4-5 stars."""
+    assert passes_target_gate({"rating": 4.4, "reviews": 50}) is True
+    assert passes_target_gate({"rating": 4.8, "reviews": 120}) is True
+    assert passes_target_gate({"rating": 4.3, "reviews": 50}) is False
+    assert passes_target_gate({"rating": 4.9, "reviews": 4}) is False   # < 5 reviews
+    assert passes_target_gate({"rating": 4.9, "reviews": 3000}) is False  # > 2000
+    assert passes_target_gate({"rating": None, "reviews": 50}) is False  # can't confirm
+    assert passes_target_gate({"rating": "4.6", "reviews": "80"}) is True  # strings ok
+    assert passes_target_gate({"rating": "junk", "reviews": 50}) is False  # malformed

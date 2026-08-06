@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -66,6 +67,34 @@ HOOKS = {
     "dental": "recall reminders and new-patient follow-up are manual",
 }
 
+# Human-writer rules from the ANCHOR job doc: banned punctuation + AI clichés.
+# Enforced programmatically AFTER generation (the doc: "if you generate any
+# text containing these, rewrite it immediately before outputting").
+AI_TELL_PATTERNS = (
+    ("em-dash", "—"), ("en-dash", "–"),
+    ("cliche 'delve'", "delve"), ("cliche 'testament'", "testament"),
+    ("cliche 'beacon'", "beacon"), ("cliche 'tapestry'", "tapestry"),
+    ("cliche 'furthermore'", "furthermore"), ("cliche 'plethora'", "plethora"),
+    ("cliche 'moreover'", "moreover"), ("cliche 'in today's world'", "in today's world"),
+    ("cliche 'it is important to note'", "it is important to note"),
+    ("cliche 'at the end of the day'", "at the end of the day"),
+    ("cliche 'seamless'", "seamless"), ("cliche 'game-changer'", "game-changer"),
+    ("cliche 'cutting-edge'", "cutting-edge"), ("cliche 'leverage'", "leverage"),
+    ("cliche 'unlock'", "unlock"), ("cliche 'streamline'", "streamline"),
+    ("cliche 'elevate'", "elevate"), ("cliche 'revolutionize'", "revolutionize"),
+)
+
+# IG failure reasons mapped to the doc's outcome vocabulary.
+IG_COLD_START_HINTS = (
+    "cold", "must message first", "cannot message", "conversation must be initiated",
+    "recipient has not messaged", "open a conversation", "not allowlisted",
+    "new contact", "recipient must message",
+)
+IG_WINDOW_HINTS = (
+    "24 hour", "24-hour", "24h", "allowed window", "messaging window",
+    "window has", "outside the window", "once the recipient",
+)
+
 
 class StopRequested(Exception):
     pass
@@ -104,6 +133,9 @@ class Pipeline:
             "metrics": {},
         }
         self.state.save_if_changed("pipeline_running", {"running": True, "run_id": run_id})
+        # Leads an email was attempted for THIS run (sent/drafted/NEEDS_ENRICHMENT).
+        # ANCHOR's IG rule: a DM is only eligible when an email attempt exists.
+        self._email_attempted: set[str] = set()
 
         try:
             scored: list[dict] = []
@@ -215,6 +247,10 @@ class Pipeline:
         """
         scored = self.scout.run(enriched)
         if not self.settings.dry_run:  # dry-run stays fully offline (no Gemini quota)
+            # Scout's judgment overlay (autonomy): Gemini may adjust the
+            # top candidates by a bounded -5..+5 before tiers are locked.
+            await self.scout.apply_judgment(
+                scored, int(self.settings.crit("judgment_leads", 15)))
             sem = asyncio.Semaphore(5)
 
             async def _rationale(lead: dict) -> None:
@@ -247,13 +283,16 @@ class Pipeline:
         """
         await self.crm.load()
         cap = min(int(self.settings.crit("emails_per_run_max", EMAIL_CAP_ABSOLUTE)), EMAIL_CAP_ABSOLUTE)
-        sent, drafted, skipped = 0, 0, 0
+        sent, drafted, skipped, bounced = 0, 0, 0, 0
         new_rows: list[list] = []
         for idx, lead in enumerate(leads, start=1):
             lid = lead_id(lead.get("name", ""), lead.get("address", ""))
             name = lead.get("name", "")
             email = lead.get("email")
             tier = lead["score"]["tier"]
+            # Every lead counts as an email attempt (sent / drafted / NEEDS
+            # ENRICHMENT) for the IG eligibility rule (doc 4).
+            self._email_attempted.add(lid)
             if not email:
                 skipped += 1
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
@@ -261,13 +300,20 @@ class Pipeline:
                 continue
             subject, body = await self._draft_email(lead)
             if tier == "HOT-VERIFIED" and sent < cap:
-                outcome = "SENT" if not self.settings.dry_run else "SENT (dry-run)"
+                outcome = "SENT (dry-run)" if self.settings.dry_run else "SENT"
+                note = "Hot - auto-sent"
                 if not self.settings.dry_run and self.composio.connected:
                     resp = await self.composio.gmail_send_email(to=email, subject=subject, body=body)
-                    outcome = "SENT" if resp.get("ok") else f"FAILED: {resp.get('error', '')}"
+                    if resp.get("ok"):
+                        outcome = "SENT"
+                    else:
+                        # Doc: failed sends are marked BOUNCED in the sheet.
+                        outcome = "BOUNCED"
+                        note = f"BOUNCED: {resp.get('error', '')[:150]}"
+                        bounced += 1
                 sent += 1
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   subject, body, outcome, "Hot - auto-sent"))
+                                                   subject, body, outcome, note))
                 self.crm.upsert(lid, name=name, email=email,
                                 instagram=lead.get("instagram", ""), tier=tier)
                 self.crm.set_status(lid, STATUS_CONTACTED)
@@ -293,6 +339,7 @@ class Pipeline:
         merged = (previous[1:] if previous and previous[0] else []) + new_rows
         await self.sheets.write_tab("Outreach", merged)
         report["metrics"]["emails_sent"] = sent
+        report["metrics"]["emails_bounced"] = bounced
         report["metrics"]["emails_drafted"] = drafted
         report["metrics"]["emails_skipped"] = skipped
 
@@ -339,6 +386,7 @@ class Pipeline:
                 if col.get("Send Date") is not None and col["Send Date"] < len(row):
                     row[col["Send Date"]] = datetime.now(UTC).date().isoformat()
                 sent += 1
+                self._email_attempted.add(lid)  # an approved send is an email attempt
                 self.crm.set_status(lid, STATUS_CONTACTED)
                 self.crm.set_last_contact(lid)
                 self.crm.schedule_followup(lid, FOLLOWUP_INTERVALS_DAYS[0])
@@ -476,26 +524,82 @@ class Pipeline:
 
     async def _stage_outreach_ig(self, leads: list[dict], report: dict) -> None:
         cap = min(int(self.settings.crit("ig_dms_per_24h_max", IG_CAP_ABSOLUTE)), IG_CAP_ABSOLUTE)
-        sent, skipped = 0, 0
+
+        # Pre-flight (doc 4): if Meta flagged/restricted the connected account,
+        # the ENTIRE Instagram stage halts and a halted record is written.
+        # Unknown status fails OPEN (never halt on a missing tool).
+        if not self.settings.dry_run and self.composio.connected:
+            status = await self.composio.ig_account_status()
+            if status and status.get("restricted"):
+                reason = str(status.get("reason") or "Instagram account flagged by Meta")
+                report["metrics"]["ig_halted"] = reason
+                await self._ig_halt_record(reason)
+                log.warning("instagram stage halted: %s", reason)
+                return
+
+        sent = skipped = failed = queued = 0
+        no_email = 0
+        new_rows: list[list] = []
         for idx, lead in enumerate(leads, start=1):
+            lid = lead_id(lead.get("name", ""), lead.get("address", ""))
+            name = lead.get("name", "")
             tier = lead["score"]["tier"]
-            ig = lead.get("instagram")
-            if tier != "HOT-VERIFIED" or not ig:
+            ig = lead.get("instagram") or ""
+            ig_verified = lead.get("ig_status") == "VERIFIED" or bool(ig)
+            if tier != "HOT-VERIFIED" or not ig_verified:
                 skipped += 1
+                new_rows.append(self._outreach_row(
+                    idx, name, lid, "", "instagram", "", "",
+                    "Skipped — not eligible", f"tier={tier} ig={'yes' if ig else 'no'}"))
                 continue
-            if sent >= cap:
-                report["metrics"]["ig_queued_cap"] = report["metrics"].get("ig_queued_cap", 0) + 1
+            # Doc: DM eligible ONLY when an email attempt was made this run.
+            if lid not in self._email_attempted:
+                skipped += 1
+                no_email += 1
+                new_rows.append(self._outreach_row(
+                    idx, name, lid, "", "instagram", "", "",
+                    "Skipped — no email attempt this run",
+                    "IG eligibility requires an email attempt in this run"))
                 continue
-            # Cold-start rule (spec 7.5): only leads that messaged first are DM-able.
             message = self._ig_first_message(lead)
+            if sent >= cap:
+                queued += 1
+                new_rows.append(self._outreach_row(
+                    idx, name, lid, "", "instagram", "", message,
+                    "Queued (cap hit)", f"{cap}/24h reached"))
+                continue
+            status, note = "SENT", "Hot - DM sent"
             if not self.settings.dry_run and self.composio.connected:
                 resp = await self.composio.ig_send_dm(recipient_id=ig, message=message)
                 if not resp.get("ok"):
-                    skipped += 1
-                    continue
-            sent += 1
+                    err = str(resp.get("error", ""))[:200]
+                    reason = self._ig_failure_reason(err)
+                    if reason == "cold_start":
+                        status, note = "Skipped — IG cold-start", err or "recipient must message first"
+                        skipped += 1
+                    elif reason == "window":
+                        status, note = "Skipped — IG 24h window", err or "outside Meta's 24h window"
+                        skipped += 1
+                    else:
+                        status, note = "Failed", err or "unknown IG error"
+                        failed += 1
+                else:
+                    sent += 1
+            else:
+                sent += 1  # dry-run simulates the send
+            new_rows.append(self._outreach_row(
+                idx, name, lid, "", "instagram", "", message, status, note))
+
+        # Carry forward the Outreach table so IG outcomes are recorded, then
+        # append this run's IG rows (doc: outcomes must be written).
+        previous = await self.sheets.read_tab("Outreach")
+        merged = (previous[1:] if previous and previous[0] else []) + new_rows
+        await self.sheets.write_tab("Outreach", merged)
         report["metrics"]["ig_sent"] = sent
         report["metrics"]["ig_skipped"] = skipped
+        report["metrics"]["ig_failed"] = failed
+        report["metrics"]["ig_queued"] = queued
+        report["metrics"]["ig_skipped_no_email"] = no_email
 
     async def _stage_pipeline(self, leads: list[dict], report: dict) -> None:
         rows = [
@@ -522,7 +626,8 @@ class Pipeline:
             self.github.clear_stop()
             raise StopRequested("stop flag set via Telegram /stop")
 
-    def _hook(self, lead: dict) -> str:
+    @staticmethod
+    def _hook(lead: dict) -> str:
         vertical = str(lead.get("vertical", "")).lower()
         hook = HOOKS.get(vertical)
         if not hook and not lead.get("website"):
@@ -531,10 +636,11 @@ class Pipeline:
 
     async def _draft_email(self, lead: dict) -> tuple[str, str]:
         name = lead.get("name", "the business")
-        city = lead.get("city", "your city")
+        subject = f"Quick question for {name}"[:50]
+        facts = self._lead_facts(lead)
         rating = lead.get("rating") or "4"
         hook = self._hook(lead)
-        subject = f"Quick question for {name}"[:50]
+        city = lead.get("city", "your city")
         body = (
             f"Hi {name} team. I help {lead.get('vertical', 'service')} businesses "
             f"in {city} cut the busywork that eats the week. I saw your {rating} star "
@@ -545,16 +651,103 @@ class Pipeline:
             f"Reply \"stop\" to opt out."
         )
         if self.llm.available:
-            polished = await self.llm.complete(
-                "Rewrite this cold outreach email to sound like a thoughtful human "
-                "writer. Rules: vary sentence length, active voice, no em-dashes, no "
-                "AI cliches, no three-part lists, under 1000 chars, keep the "
-                "CAN-SPAM 'Reply stop to opt out' line, keep the personal facts. "
-                f"Original:\n\n{body}"
-            )
-            if polished and "Reply" in polished and "stop" in polished:
-                body = polished[:1000]
+            body = await self._humanize(facts, body)
         return subject, body
+
+    # ---------- ANCHOR human-writer rules (doc 4) ----------
+    @staticmethod
+    def _lead_facts(lead: dict) -> str:
+        """PII-safe facts about THIS lead for per-lead personalization. Only
+        facts already public in the lead row — never invented."""
+        website = str(lead.get("website") or "").strip()
+        status = str(lead.get("website_status") or "").strip()
+        site = "No website at all" if not website else (
+            f"Has a website{'; ' + status if status else ''}")
+        facts = [
+            f"Business: {lead.get('name', '')}",
+            f"Category: {lead.get('vertical', '')}",
+            f"City: {lead.get('city', '')}",
+            f"Google rating: {lead.get('rating', '')} ({lead.get('reviews', '')} reviews)",
+            site,
+        ]
+        if lead.get("instagram"):
+            facts.append(f"Instagram active: @{lead.get('instagram')}")
+        facts.append(f"Observed bottleneck: {Pipeline._hook(lead)}")
+        return "\n".join(facts)
+
+    async def _humanize(self, facts: str, draft: str) -> str:
+        """Gemini rewrite with the doc's writer rules, then ENFORCE them: lint
+        the result, rewrite once if it still violates, sanitize as last resort.
+        Always keeps the CAN-SPAM opt-out line and the real facts."""
+        prompt = (
+            "Rewrite this cold outreach email as a thoughtful human copywriter. "
+            "Personalize it using the FACTS below: reference one concrete detail "
+            "about this specific business (its rating without a website, no online "
+            "booking, etc.) so it can't be a pasted template. Rules: vary sentence "
+            "length dramatically; active voice; confident, direct tone. STRICTLY NO "
+            "em-dashes, no AI cliches (delve, testament, beacon, tapestry, furthermore, "
+            "'in today's world', 'it is important to note', 'at the end of the day'), "
+            "no three-part lists, no hype. Keep the CAN-SPAM opt-out line "
+            "'Reply \"stop\" to opt out.' and keep every fact accurate. Under 1000 chars.\n\n"
+            f"FACTS:\n{facts}\n\nDRAFT:\n{draft}"
+        )
+        polished = (await self.llm.complete(prompt) or "").strip()
+        if not polished:
+            return self._sanitize_ai_tells(draft)
+        violations = self._lint_ai_tells(polished)
+        if not violations:
+            # CAN-SPAM guard: never send without the opt-out line (doc 4).
+            return (polished[:1000] if self._has_opt_out(polished)
+                    else self._sanitize_ai_tells(draft))
+        # Doc rule: rewrite immediately when banned content appears.
+        again = (await self.llm.complete(
+            "Your email still violates the writer rules. Fix ALL of these and "
+            "return the full rewritten email, keeping the opt-out line and facts:\n"
+            + "\n".join(f"- {v}" for v in violations)
+            + f"\n\nFACTS:\n{facts}\n\nDRAFT:\n{polished}"
+        ) or "").strip()
+        if again and not self._lint_ai_tells(again) and self._has_opt_out(again):
+            return again[:1000]
+        # Last resort: sanitize the (compliant) template draft.
+        return self._sanitize_ai_tells(again or draft)
+
+    @staticmethod
+    def _has_opt_out(text: str) -> bool:
+        lowered = (text or "").lower()
+        return "reply" in lowered and "stop" in lowered
+
+    @classmethod
+    def _lint_ai_tells(cls, text: str) -> list[str]:
+        """Return every banned AI tell found in the text (doc 4 list)."""
+        lowered = (text or "").lower()
+        return [label for label, token in AI_TELL_PATTERNS if token.lower() in lowered]
+
+    @classmethod
+    def _sanitize_ai_tells(cls, text: str) -> str:
+        """Last-resort cleanup: replace em/en-dashes and strip banned cliches."""
+        text = (text or "").replace("—", ", ").replace("–", ", ")
+        for _, token in AI_TELL_PATTERNS:
+            text = re.sub(rf"\b{re.escape(token)}\b", "", text, flags=re.IGNORECASE)
+        return re.sub(r"\s{2,}", " ", text).strip()
+
+    @classmethod
+    def _ig_failure_reason(cls, error: str) -> str:
+        """Map a Meta/Composio DM error to the doc's outcome vocabulary."""
+        lowered = (error or "").lower()
+        if any(h in lowered for h in IG_COLD_START_HINTS):
+            return "cold_start"
+        if any(h in lowered for h in IG_WINDOW_HINTS):
+            return "window"
+        return "other"
+
+    async def _ig_halt_record(self, reason: str) -> None:
+        """Write the halted record the doc requires when IG pre-flight fails."""
+        previous = await self.sheets.read_tab("Outreach")
+        merged = (previous[1:] if previous and previous[0] else []) + [
+            [1, "Instagram", "", "", "instagram", "HALTED", "",
+             "Halted", f"IG stage halted: {reason}"],
+        ]
+        await self.sheets.write_tab("Outreach", merged)
 
     @staticmethod
     def _ig_first_message(lead: dict) -> str:
@@ -584,7 +777,14 @@ class Pipeline:
             lines.append(f"Emails: sent={metrics.get('emails_sent', 0)} "
                          f"drafted={metrics.get('emails_drafted', 0)} "
                          f"skipped={metrics.get('emails_skipped', 0)}")
-            lines.append(f"IG: sent={metrics.get('ig_sent', 0)} skipped={metrics.get('ig_skipped', 0)}")
+            lines.append("IG: " + " ".join(
+                f"{k}={metrics.get(k, 0)}" for k in
+                ("ig_sent", "ig_skipped", "ig_failed", "ig_queued")))
+            if metrics.get("ig_skipped_no_email"):
+                lines.append("ℹ️ IG skips: an email attempt is required before a DM "
+                             "(run 'full' or 'outreach-email' first)")
+            if metrics.get("ig_halted"):
+                lines.append(f"⚠️ IG stage HALTED: {metrics['ig_halted']}")
             if metrics.get("sheet_tabs_failed"):
                 lines.append(f"⚠️ Sheet write FAILED for {metrics['sheet_tabs_failed']} tab(s) "
                              f"({metrics.get('sheet_tabs_written', 0)} ok)")

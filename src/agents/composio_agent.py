@@ -73,6 +73,8 @@ SLUG_ALIASES: dict[str, list[str]] = {
                      "SERPAPI_GOOGLE_LIGHT_SEARCH", "SERPER_GOOGLE_SEARCH"],
     "fetch_url": ["COMPOSIO_SEARCH_FETCH_URL_CONTENT"],
     "ig_send_dm": ["INSTAGRAM_SEND_TEXT_MESSAGE"],
+    "ig_account_info": ["INSTAGRAM_GET_ACCOUNT_INFO", "INSTAGRAM_GET_PROFILE_INFO",
+                         "INSTAGRAM_GET_USER_DETAILS"],
     "multi_execute": ["COMPOSIO_MULTI_EXECUTE_TOOL"],
     "manage_connections": ["COMPOSIO_MANAGE_CONNECTIONS"],
     "wait_connections": ["COMPOSIO_WAIT_FOR_CONNECTIONS"],
@@ -362,3 +364,29 @@ class ComposioAgent:
             self.slug("ig_send_dm"),
             {"recipient_id": recipient_id, "text": message},
         )
+
+    async def ig_account_status(self) -> dict | None:
+        """Return {"restricted": bool, "reason": str} for the connected
+        Instagram account, or None when it can't be determined.
+
+        Used by ANCHOR's pre-flight: if Meta has flagged/restricted the account
+        the IG stage must halt. Fail-OPEN: unknown/missing tool -> None, so the
+        stage never halts on a tooling gap, only on a real restriction signal.
+        """
+        try:
+            resp = await self.execute_action(self.slug("ig_account_info"), {})
+        except ComposioNotConfigured:
+            return None
+        if not resp.get("ok"):
+            return None
+        data = resp.get("data") or {}
+        if not isinstance(data, dict):
+            return None
+        text = str(data).lower()
+        restricted_words = (
+            "restricted", "action_blocked", "action blocked", "flagged",
+            "temporarily limited", "limited access", "disabled", "banned",
+        )
+        if any(w in text for w in restricted_words):
+            return {"restricted": True, "reason": text[:140]}
+        return {"restricted": False, "reason": ""}

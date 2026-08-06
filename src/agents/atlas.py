@@ -40,6 +40,22 @@ def has_any_contact(lead: dict) -> bool:
     return bool(lead.get("phone") or lead.get("email") or lead.get("instagram"))
 
 
+def passes_target_gate(lead: dict, rating_min: float = 4.4,
+                       reviews_min: float = 5, reviews_max: float = 2000) -> bool:
+    """Job doc 1: target businesses are 4.4-5 stars with an established review
+    count. Leads missing rating/review data fail the gate (can't confirm
+    quality); malformed values fail closed."""
+    rating = lead.get("rating")
+    reviews = lead.get("reviews")
+    if rating is None or reviews is None:
+        return False
+    try:
+        return (rating_min <= float(rating) <= 5.0
+                and reviews_min <= float(reviews) <= reviews_max)
+    except (TypeError, ValueError):
+        return False
+
+
 def has_chatbot(html: str) -> bool:
     lowered = (html or "").lower()
     return any(sig in lowered for sig in CHATBOT_SIGNATURES)
@@ -73,6 +89,11 @@ class Atlas:
         pool = dedupe(pool)
         chain_names = flag_in_pool_chains(pool)
 
+        # Target profile gates (job doc: 4.4-5 stars, established local business).
+        rating_min = float(self._settings.crit("rating_min", 4.4))
+        reviews_min = float(self._settings.crit("reviews_min", 5))
+        reviews_max = float(self._settings.crit("reviews_max", 2000))
+
         clean: list[dict] = []
         for lead in pool:
             if is_closed(lead.get("open_state", "")):
@@ -83,11 +104,8 @@ class Atlas:
                 continue
             if not has_any_contact(lead):
                 continue
-            # Chatbot/agency checks need homepage HTML; in offline mode mocks
-            # mark _mock so we skip network. Online: fetch URL when present.
-            if not lead.get("_mock") and lead.get("website"):
-                # Deferred to enrichment to avoid blocking discovery on network.
-                pass
+            if not passes_target_gate(lead, rating_min, reviews_min, reviews_max):
+                continue
             clean.append(lead)
 
         cap = int(self._settings.crit("raw_pool_cap", 250))
