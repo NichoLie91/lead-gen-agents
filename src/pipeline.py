@@ -575,10 +575,18 @@ class Pipeline:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="lead-gen-agents pipeline")
-    parser.add_argument("--mode", choices=MODES, default="full")
+    parser.add_argument("--mode", default="full")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run offline with mock data (no Composio/GitHub/Telegram side effects)")
     args = parser.parse_args()
+
+    # Scheduled workflow runs pass an EMPTY --mode (inputs.mode == ''), which
+    # argparse choices would reject (exit 2 — the 2026-08-05 scheduled-run
+    # failure). Normalize empty/whitespace to the 'full' default; still reject
+    # genuinely unknown modes so a typo can't silently run the wrong stage.
+    mode = (args.mode or "").strip().lower() or "full"
+    if mode not in MODES:
+        parser.error(f"argument --mode: invalid choice: '{mode}' (choose from {', '.join(MODES)})")
 
     import os
     if args.dry_run:
@@ -587,7 +595,7 @@ def main() -> None:
     import src.core.logging as logmod
     logmod.setup_logging()
 
-    report = asyncio.run(Pipeline(settings).run(args.mode))
+    report = asyncio.run(Pipeline(settings).run(mode))
     sheet_url = ""
     if not settings.dry_run and settings.google_sheet_id:
         sheet_url = f"https://docs.google.com/spreadsheets/d/{settings.google_sheet_id}"

@@ -50,8 +50,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pipeline (mode=${{ inputs.mode }})
-        run: python -m src.pipeline --mode "${{ inputs.mode }}"
+      # Scheduled runs carry NO mode input (inputs.mode == ''), so default to
+      # 'full' here — argparse rejects the empty string (exit 2), which is
+      # exactly what broke the 2026-08-05 scheduled run.
+      - name: Run pipeline (mode=${{ inputs.mode != '' && inputs.mode || 'full' }})
+        run: python -m src.pipeline --mode "${{ inputs.mode != '' && inputs.mode || 'full' }}"
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GH_PAT: ${{ secrets.GH_PAT }}
