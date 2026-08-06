@@ -1,18 +1,15 @@
 {
-  "run_id": "456a6511",
-  "mode": "discovery",
-  "started_at": "2026-08-05T11:07:35.843887+00:00",
+  "run_id": "bb782a90",
+  "mode": "inbound",
+  "started_at": "2026-08-06T10:47:14.170304+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "candidates": 60,
-    "with_email": 23,
-    "needs_enrichment": 37,
-    "tiers": {
-      "HOT-VERIFIED": 8,
-      "WARM": 51
-    },
-    "sheet_tabs_written": 2,
+    "inbound_scanned": 10,
+    "inbound_processed": 0,
+    "inbound_owner_notified": 0,
+    "inbound_auto_replied": 0,
+    "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-05T11:07:35.869888+00:00"
+  "finished_at": "2026-08-06T10:47:38.329473+00:00"
 }
