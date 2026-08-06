@@ -45,3 +45,40 @@ class GeminiClient:
         except Exception as exc:  # quota (429) etc. — fall back to templates
             log.warning("Gemini call failed: %s", exc)
             return ""
+
+
+class GeminiPool:
+    """Load-splitting Gemini wrapper — duck-types ``GeminiClient`` (has
+    ``available`` + async ``complete``) so any code that takes an LLM can take
+    a pool instead.
+
+    With two API keys configured (``GEMINI_API_KEY`` + ``GEMINI_API_KEY_2``)
+    each ``complete()`` round-robins to the next key, splitting the load and
+    roughly doubling the free-tier daily quota. Roles pick the model:
+    "fast" (quick judgment: Atlas queries, Scout rationale, Enrichment
+    extraction, Followups polish, Inbound labels) vs "pro" (heavier writing:
+    outreach drafts, the Lead Agent's conversational brain).
+
+    Falls back to a single key (or fully offline) when fewer are configured.
+    """
+
+    def __init__(self, settings=None, role: str = "fast", clients: list | None = None):
+        if clients is not None:
+            self._clients = list(clients)
+        else:
+            keys = [k for k in (settings.gemini_api_key, settings.gemini_api_key_2) if k]
+            model = (settings.gemini_model_pro if role == "pro"
+                     else settings.gemini_model_fast)
+            self._clients = [GeminiClient(k, model) for k in keys]
+        self._idx = 0
+
+    @property
+    def available(self) -> bool:
+        return any(getattr(c, "available", False) for c in self._clients)
+
+    async def complete(self, prompt: str) -> str:
+        if not self._clients:
+            return ""
+        client = self._clients[self._idx % len(self._clients)]
+        self._idx += 1
+        return await client.complete(prompt)

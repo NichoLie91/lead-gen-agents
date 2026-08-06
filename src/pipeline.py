@@ -31,7 +31,7 @@ from src.agents.sheets_agent import SheetsAgent
 from src.approvals import ApprovalQueue
 from src.core.config import Settings
 from src.core.ident import lead_id
-from src.core.llm import GeminiClient
+from src.core.llm import GeminiPool
 from src.core.logging import TelegramNotifier
 from src.core.state import StateStore
 from src.enrichment import enrich_leads
@@ -76,16 +76,20 @@ class Pipeline:
         self.settings = settings
         self.state = StateStore(settings.state_dir)
         self.composio = ComposioAgent(settings)
-        self.llm = GeminiClient(settings.gemini_api_key, settings.gemini_model)
+        # Two model tiers over (up to) two Gemini keys: quick judgment uses the
+        # fast pool, heavier writing the pro pool — both round-robin across
+        # keys to split the load (see GeminiPool).
+        self.llm = GeminiPool(settings, role="pro")
+        self.fast_llm = GeminiPool(settings, role="fast")
         self.github = GitHubAgent(settings, self.state)
         self.sheets = SheetsAgent(self.composio, settings, self.state)
         self.crm = CrmAgent(self.sheets)
         self.approvals = ApprovalQueue(self.state)
         # Every agent carries the shared Gemini brain (falls back to
         # deterministic behavior when the key is absent).
-        self.maps = MapsAgent(self.composio, settings, llm=self.llm)
+        self.maps = MapsAgent(self.composio, settings, llm=self.fast_llm)
         self.atlas = Atlas(self.maps, settings)
-        self.scout = Scout(settings, llm=self.llm)
+        self.scout = Scout(settings, llm=self.fast_llm)
         self.notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_alert_chat_id)
 
     # ---------- main entry ----------
@@ -195,7 +199,7 @@ class Pipeline:
         return kept
 
     async def _stage_enrichment(self, raw: list[dict], report: dict) -> list[dict]:
-        enriched = await enrich_leads(raw, self.composio, self.settings, llm=self.llm)
+        enriched = await enrich_leads(raw, self.composio, self.settings, llm=self.fast_llm)
         with_email = sum(1 for l in enriched if l.get("email"))
         report["metrics"]["with_email"] = with_email
         report["metrics"]["needs_enrichment"] = len(enriched) - with_email
@@ -360,8 +364,8 @@ class Pipeline:
             sent_n = int(row.get("Follow-ups Sent") or 0)
             subject = f"Quick question for {name}"[:50]
             body = build_followup_body(row, sent_n)
-            if self.llm.available:
-                polished = await self.llm.complete(
+            if self.fast_llm.available:
+                polished = await self.fast_llm.complete(
                     "Rewrite this short follow-up to sound human: no em-dashes, "
                     "no AI cliches, under 900 chars, keep the opt-out line. "
                     f"Original:\n\n{body}"
@@ -427,8 +431,8 @@ class Pipeline:
                 continue  # not a tracked lead's reply
             lid = lead["Lead ID"]
             llm_label = ""
-            if self.llm.available:
-                llm_label = await self.llm.complete(
+            if self.fast_llm.available:
+                llm_label = await self.fast_llm.complete(
                     "Classify this lead's reply as exactly one of: INTERESTED, "
                     "PRICE_OBJECTION, STOP, QUESTION. Reply with only the label.\n"
                     f"Lead: {lead.get('Name')}\nReply: {text[:800]}"

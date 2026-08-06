@@ -20,7 +20,7 @@ from src.agents.github_agent import GitHubAgent
 from src.agents.lead_agent import LeadAgent
 from src.bot.commands import is_allowed
 from src.core.config import Settings
-from src.core.llm import GeminiClient
+from src.core.llm import GeminiClient, GeminiPool
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -78,6 +78,14 @@ async def _dispatch_command(
     return await _make_lead(settings, state, github).delegate(command, args, user_id)
 
 
+def _pro_brain(settings: Settings) -> GeminiPool:
+    """Lead Agent brain: pro model tier, load-split across both Gemini keys."""
+    clients = [GeminiClient(settings.gemini_api_key, settings.gemini_model_pro)]
+    if settings.gemini_api_key_2:
+        clients.append(GeminiClient(settings.gemini_api_key_2, settings.gemini_model_pro))
+    return GeminiPool(clients=clients)
+
+
 async def _handle_free_text(
     text: str,
     settings: Settings,
@@ -88,7 +96,7 @@ async def _handle_free_text(
 ) -> str:
     """Route free text through the Lead Agent's Gemini intent brain."""
     if llm is None:
-        llm = GeminiClient(settings.gemini_api_key, settings.gemini_model)
+        llm = _pro_brain(settings)
     return await _make_lead(settings, state, github, llm=llm)._handle_free_text(text, user_id)
 
 
@@ -109,8 +117,7 @@ async def handle_update(
         log.info("ignoring message from unauthorized user %s", user_id)
         return
 
-    llm = GeminiClient(settings.gemini_api_key, settings.gemini_model)
-    lead = _make_lead(settings, state, github, llm=llm)
+    lead = _make_lead(settings, state, github, llm=_pro_brain(settings))
     reply = await lead.handle_message(text, user_id)
     await send_message(settings.telegram_bot_token, chat_id, reply)
 

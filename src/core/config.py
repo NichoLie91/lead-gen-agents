@@ -47,10 +47,19 @@ class Settings:
     # --- secrets (empty when absent -> components run offline) ---
     telegram_bot_token: str = ""
     gemini_api_key: str = ""
+    # Second Gemini key: splits LLM load (round-robin across keys) and roughly
+    # doubles the free-tier daily quota. Optional; everything works with one.
+    gemini_api_key_2: str = ""
     # gemini-flash-latest is an always-current alias; gemini-2.5-flash now
     # returns 404 for new keys (2026-08). Pin a versioned model via
     # GEMINI_MODEL when you need reproducibility.
     gemini_model: str = "gemini-flash-latest"
+    # Per-job model tiers (probed live 2026-08 on both keys): preview/pro
+    # models are quota-blocked on free-tier keys, so both default to
+    # gemini-3.5-flash (proven on both keys). Override per role via
+    # GEMINI_MODEL_FAST / GEMINI_MODEL_PRO when a key has higher-tier access.
+    gemini_model_fast: str = "gemini-3.5-flash"   # quick judgment: Atlas/Scout/Enrichment/Followups/Inbound
+    gemini_model_pro: str = "gemini-3.5-flash"    # heavier writing: outreach drafts + Lead Agent brain
     composio_api_key: str = ""
     gh_pat: str = ""
     google_sheet_id: str = ""
@@ -73,9 +82,12 @@ class Settings:
         settings = cls(
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             gemini_api_key=env.get("GEMINI_API_KEY", ""),
-            # `or` guard: Actions sets GEMINI_MODEL to "" when the repo
-            # variable is unset, which env.get(default) would not catch.
+            gemini_api_key_2=env.get("GEMINI_API_KEY_2", ""),
+            # `or` guard: Actions sets these to "" when the repo variable is
+            # unset, which env.get(default) would not catch.
             gemini_model=(env.get("GEMINI_MODEL") or "gemini-flash-latest"),
+            gemini_model_fast=(env.get("GEMINI_MODEL_FAST") or "gemini-3.5-flash"),
+            gemini_model_pro=(env.get("GEMINI_MODEL_PRO") or "gemini-3.5-flash"),
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),

@@ -60,9 +60,14 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
   read/write + Actions + Workflows), `COMPOSIO_API_KEY`, `GOOGLE_SHEET_ID`.
 - **Composio connections**: `googlesheets` + `gmail` (ACTIVE for your
   connected Google account), `instagram` (connect a Meta Business account).
-- **Gemini**: defaults to `gemini-flash-latest` (always-current alias; pin via
-  the `GEMINI_MODEL` repo variable). One key powers the Lead Agent brain and
-  every agent's Gemini features.
+- **Gemini**: two model tiers over (up to) two keys. `GEMINI_API_KEY_2`
+  (optional) round-robins every LLM call across both keys — splitting load and
+  roughly doubling the free-tier daily quota. `GEMINI_MODEL_FAST` (quick
+  judgment: Atlas queries, Scout rationale, Enrichment extraction, Followups,
+  Inbound) and `GEMINI_MODEL_PRO` (heavier writing: outreach drafts + the Lead
+  Agent brain) both default to `gemini-3.5-flash` (proven on both keys;
+  preview/pro models are quota-blocked on free-tier keys). Override the roles
+  via repo variables whenever a key gets higher-tier access.
 
 ## Local development
 
