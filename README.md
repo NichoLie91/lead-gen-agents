@@ -44,6 +44,7 @@ Agent** (tool gateway + web-search enrichment).
 | `/send all email` | Send emails from approved + Hot leads (50/run cap) |
 | `/send all instagram` | Send IG DMs (15/24h cap, Meta cold-start rules) |
 | `/sheet` | Google Sheet link |
+| `/usage` | Which Gemini key + model handled the last N LLM calls (load-split dashboard) |
 | `/help`, `/id` | Command list; show your Telegram user ID |
 
 ## GitHub rate limiting

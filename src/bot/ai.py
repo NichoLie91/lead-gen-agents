@@ -31,7 +31,7 @@ RUN_MODES = (
 ALLOWED_COMMANDS = set(KNOWN_COMMANDS.values())
 
 # Commands that take an argument (everything else ignores args).
-COMMANDS_WITH_ARGS = {"/approve", "/reject", "/run"}
+COMMANDS_WITH_ARGS = {"/approve", "/reject", "/run", "/usage"}
 
 _ACTIONS_DESCRIPTION = (
     "/run — trigger the pipeline (optionally /run <mode>: full | discovery | "

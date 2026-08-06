@@ -31,7 +31,7 @@ from src.agents.sheets_agent import SheetsAgent
 from src.approvals import ApprovalQueue
 from src.core.config import Settings
 from src.core.ident import lead_id
-from src.core.llm import GeminiPool
+from src.core.llm import GeminiPool, LLMUsage
 from src.core.logging import TelegramNotifier
 from src.core.state import StateStore
 from src.enrichment import enrich_leads
@@ -78,9 +78,11 @@ class Pipeline:
         self.composio = ComposioAgent(settings)
         # Two model tiers over (up to) two Gemini keys: quick judgment uses the
         # fast pool, heavier writing the pro pool — both round-robin across
-        # keys to split the load (see GeminiPool).
-        self.llm = GeminiPool(settings, role="pro")
-        self.fast_llm = GeminiPool(settings, role="fast")
+        # keys to split the load (see GeminiPool). Every call is recorded for
+        # the /usage dashboard command.
+        self.usage = LLMUsage(settings.state_dir)
+        self.llm = GeminiPool(settings, role="pro", usage=self.usage)
+        self.fast_llm = GeminiPool(settings, role="fast", usage=self.usage)
         self.github = GitHubAgent(settings, self.state)
         self.sheets = SheetsAgent(self.composio, settings, self.state)
         self.crm = CrmAgent(self.sheets)

@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 STATE_FILES = [
     "telegram_offset", "github_ratelimit", "stop_requested",
     "pipeline_running", "last_run", "dedupe", "sheet_mirror",
-    "approvals", "inbound_seen",
+    "approvals", "inbound_seen", "llm_usage",
 ]
 
 GITHUB_API = "https://api.github.com"

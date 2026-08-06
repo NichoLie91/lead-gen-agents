@@ -6,7 +6,11 @@ template-based drafting. Kept behind a tiny wrapper so tests never need a key.
 """
 from __future__ import annotations
 
+import json
 import logging
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +51,60 @@ class GeminiClient:
             return ""
 
 
+class LLMUsage:
+    """Persisted ring buffer of recent Gemini calls (dashboard data).
+
+    PII-SAFE (spec 11): stores only the key alias ("key1"/"key2"), model,
+    role, success flag and latency — never prompts, key material or lead data.
+    Written to ``state/llm_usage.json`` and committed with the other state
+    files so the Telegram bot (a separate ephemeral job) can report the last
+    N calls with the /usage command.
+    """
+
+    MAX = 100
+
+    def __init__(self, state_dir):
+        self._path = Path(state_dir) / "llm_usage.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._calls: list[dict] = []
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                self._calls = data[-self.MAX:]
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._calls = []
+
+    def record(self, *, key: str, model: str, role: str, ok: bool,
+               latency_ms: int) -> None:
+        self._calls.append({
+            "key": key, "model": model, "role": role,
+            "ok": bool(ok), "ms": int(latency_ms),
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        })
+        self._calls = self._calls[-self.MAX:]
+        try:
+            self._path.write_text(
+                json.dumps(self._calls, separators=(",", ":")), encoding="utf-8")
+        except OSError:
+            pass
+
+    def recent(self, n: int = 20) -> list[dict]:
+        return self._calls[-n:]
+
+    def totals(self, n: int = 50) -> dict:
+        """Per-key + ok/failed counts over the last n calls (any key count)."""
+        calls = self._calls[-n:]
+        by_key: dict[str, int] = {}
+        for call in calls:
+            key = call.get("key", "?")
+            by_key[key] = by_key.get(key, 0) + 1
+        return {
+            "by_key": by_key,
+            "ok": sum(1 for c in calls if c.get("ok")),
+            "failed": sum(1 for c in calls if not c.get("ok")),
+        }
+
+
 class GeminiPool:
     """Load-splitting Gemini wrapper — duck-types ``GeminiClient`` (has
     ``available`` + async ``complete``) so any code that takes an LLM can take
@@ -60,9 +118,12 @@ class GeminiPool:
     outreach drafts, the Lead Agent's conversational brain).
 
     Falls back to a single key (or fully offline) when fewer are configured.
+    Every call is recorded into the optional ``usage`` recorder (LLMUsage)
+    for the /usage dashboard command.
     """
 
-    def __init__(self, settings=None, role: str = "fast", clients: list | None = None):
+    def __init__(self, settings=None, role: str = "fast", clients: list | None = None,
+                 usage: LLMUsage | None = None):
         if clients is not None:
             self._clients = list(clients)
         else:
@@ -71,6 +132,8 @@ class GeminiPool:
                      else settings.gemini_model_fast)
             self._clients = [GeminiClient(k, model) for k in keys]
         self._idx = 0
+        self._role = role
+        self._usage = usage
 
     @property
     def available(self) -> bool:
@@ -79,6 +142,17 @@ class GeminiPool:
     async def complete(self, prompt: str) -> str:
         if not self._clients:
             return ""
-        client = self._clients[self._idx % len(self._clients)]
+        idx = self._idx % len(self._clients)
+        client = self._clients[idx]
         self._idx += 1
-        return await client.complete(prompt)
+        start = time.monotonic()
+        result = await client.complete(prompt)
+        if self._usage is not None:
+            self._usage.record(
+                key=f"key{idx + 1}",
+                model=getattr(client, "_model", "?"),
+                role=self._role,
+                ok=bool(result),
+                latency_ms=int((time.monotonic() - start) * 1000),
+            )
+        return result

@@ -17,6 +17,7 @@ COMMAND_HELP = {
     "/send all email": "Send all emails from the approved leads",
     "/send all instagram": "Send all leads an Instagram DM",
     "/id": "Show your Telegram user ID (for the admin allow-list)",
+    "/usage": "Which Gemini key + model handled the last N LLM calls (/usage, or /usage 50)",
 }
 
 KNOWN_COMMANDS = {c.lower(): c for c in COMMAND_HELP}

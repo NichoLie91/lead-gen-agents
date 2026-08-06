@@ -33,7 +33,7 @@ from src.approvals import ApprovalQueue
 from src.bot.ai import RUN_MODES, classify_intent
 from src.bot.commands import build_help, format_status, parse_command
 from src.core.config import Settings
-from src.core.llm import GeminiClient
+from src.core.llm import GeminiClient, GeminiPool, LLMUsage
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ COMMAND_OWNERS = {
     "/sheet": ("Enrichment",),
     "/help": (),
     "/id": (),
+    "/usage": (),
 }
 
 
@@ -87,11 +88,14 @@ class LeadAgent:
 
     def __init__(self, settings: Settings, state: StateStore,
                  github: GitHubAgent | None = None,
-                 llm: GeminiClient | None = None):
+                 llm: GeminiClient | GeminiPool | None = None):
         self.settings = settings
         self.state = state
         self.github = github or GitHubAgent(settings, state)
-        self.llm = llm or GeminiClient(settings.gemini_api_key, settings.gemini_model)
+        # Default brain is a recording pro pool so even direct constructions
+        # feed the /usage dashboard (empty-key pools are available=False).
+        self.llm = llm or GeminiPool(settings, role="pro",
+                                     usage=LLMUsage(settings.state_dir))
         self.approvals = ApprovalQueue(state)
 
     # ---------- brain: what Gemini knows ----------
@@ -156,7 +160,32 @@ class LeadAgent:
             return await self.github.trigger_pipeline("inbound")
         if command == "/followups":
             return await self.github.trigger_pipeline("followups")
+        if command == "/usage":
+            return self._usage_report(args)
         return "Unknown command. Send /help."
+
+    # ---------- dashboard: which Gemini key/model handled recent calls ----------
+    def _usage_report(self, n: str = "") -> str:
+        from src.core.llm import LLMUsage
+
+        usage = LLMUsage(self.settings.state_dir)
+        try:
+            count = max(1, min(int(n.strip() or 20), 100))
+        except ValueError:
+            count = 20
+        calls = usage.recent(count)
+        if not calls:
+            return ("No Gemini calls recorded yet. Runs and bot replies will "
+                    "show up here — e.g. /usage 30.")
+        lines = [f"📊 Gemini usage — last {len(calls)} calls:"]
+        for call in reversed(calls):
+            mark = "✅" if call.get("ok") else "⚠️"
+            lines.append(f"{mark} {call.get('key')} · {call.get('model')} · "
+                         f"{call.get('role')} · {call.get('ms')}ms")
+        totals = usage.totals(len(calls))
+        by_key = " · ".join(f"{k}={v}" for k, v in sorted(totals["by_key"].items()))
+        lines.append(f"Totals: {by_key} · ok={totals['ok']} · failed={totals['failed']}")
+        return "\n".join(lines)
 
     # ---------- approval flow (Outreach agent, Step 04) ----------
     def _approve_drafts(self, args: str) -> str:

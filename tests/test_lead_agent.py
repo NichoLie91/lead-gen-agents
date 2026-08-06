@@ -8,6 +8,7 @@ from src.agents.lead_agent import COMMAND_OWNERS, TEAM, LeadAgent, team_roster
 from src.agents.maps_agent import MapsAgent
 from src.agents.scout import Scout
 from src.core.config import Settings
+from src.core.llm import LLMUsage
 from src.core.state import StateStore
 from src.enrichment import _llm_extract, enrich_leads
 
@@ -90,6 +91,29 @@ def test_delegate_approve_all(tmp_path):
     reply = asyncio.run(lead.delegate("/approve", "all", 0))
     assert "Approved 2 draft" in reply
     assert len(lead.approvals.pending()) == 0
+
+
+def test_delegate_usage_report(tmp_path):
+    settings, state = make_harness(tmp_path)
+    usage = LLMUsage(tmp_path / "state")
+    usage.record(key="key1", model="gemini-3.5-flash", role="fast", ok=True, latency_ms=120)
+    usage.record(key="key2", model="gemini-3.5-flash", role="pro", ok=True, latency_ms=300)
+    usage.record(key="key2", model="gemini-3.5-flash", role="pro", ok=False, latency_ms=450)
+    lead = LeadAgent(settings, state, github=FakeGithub())
+    reply = asyncio.run(lead.delegate("/usage", "", 0))
+    assert "Gemini usage" in reply and "key1" in reply and "key2" in reply
+    assert "key1=1" in reply and "key2=2" in reply
+    assert "failed=1" in reply
+    # explicit count
+    reply = asyncio.run(lead.delegate("/usage", "1", 0))
+    assert "last 1 calls" in reply
+
+
+def test_delegate_usage_empty(tmp_path):
+    settings, state = make_harness(tmp_path)
+    lead = LeadAgent(settings, state, github=FakeGithub())
+    reply = asyncio.run(lead.delegate("/usage", "", 0))
+    assert "No Gemini calls recorded" in reply
 
 
 def test_delegate_stop(tmp_path):

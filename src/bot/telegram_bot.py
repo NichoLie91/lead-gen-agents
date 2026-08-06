@@ -20,7 +20,7 @@ from src.agents.github_agent import GitHubAgent
 from src.agents.lead_agent import LeadAgent
 from src.bot.commands import is_allowed
 from src.core.config import Settings
-from src.core.llm import GeminiClient, GeminiPool
+from src.core.llm import GeminiClient, GeminiPool, LLMUsage
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -79,11 +79,13 @@ async def _dispatch_command(
 
 
 def _pro_brain(settings: Settings) -> GeminiPool:
-    """Lead Agent brain: pro model tier, load-split across both Gemini keys."""
+    """Lead Agent brain: pro model tier, load-split across both Gemini keys,
+    with per-call recording for the /usage dashboard command."""
+    usage = LLMUsage(settings.state_dir)
     clients = [GeminiClient(settings.gemini_api_key, settings.gemini_model_pro)]
     if settings.gemini_api_key_2:
         clients.append(GeminiClient(settings.gemini_api_key_2, settings.gemini_model_pro))
-    return GeminiPool(clients=clients)
+    return GeminiPool(clients=clients, role="pro", usage=usage)
 
 
 async def _handle_free_text(

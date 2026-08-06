@@ -55,7 +55,7 @@ def test_help_lists_all_commands():
     help_text = build_help()
     for cmd in ("/run", "/status", "/stop", "/approve", "/reject all",
                 "/send all email", "/send all instagram", "/sheet", "/id",
-                "/list drafts", "/reject", "/inbound", "/followups"):
+                "/list drafts", "/reject", "/inbound", "/followups", "/usage"):
         assert cmd in help_text
 
 

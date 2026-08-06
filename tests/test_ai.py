@@ -78,6 +78,11 @@ def test_parse_strips_args_for_argless_commands():
     assert got == {"action": "command", "command": "/stop", "args": ""}
 
 
+def test_parse_keeps_usage_count_arg():
+    got = parse_intent_response('{"action": "command", "command": "/usage", "args": "50"}')
+    assert got == {"action": "command", "command": "/usage", "args": "50"}
+
+
 def test_parse_rejects_garbage():
     assert parse_intent_response("") == {}
     assert parse_intent_response("hello there") == {}
