@@ -158,7 +158,9 @@ class GitHubAgent:
         verbatim — never raises, so a 403/API error cannot crash the poller.
         """
         if not self._enabled:
-            return "skipped (dry-run / GH_PAT not set)"
+            return ("skipped (dry-run / GH_PAT not set) - add a personal access "
+                    "token with 'repo' + 'workflow' scopes as the GH_PAT repo "
+                    "secret to enable /run and cloud state commits")
         slug = self._repo_slug()
         if not slug:
             return "trigger failed: could not determine owner/repo (set GITHUB_REPOSITORY or git remote origin)"
