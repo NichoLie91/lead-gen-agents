@@ -11,16 +11,27 @@ no servers to manage.
 > the private Google Sheet. Anything committed to `state/` is non-PII metadata
 > plus one-way hashes. Never commit secrets or lead data.
 
-## The 6 agents
+## The team
 
-| Agent | Role |
-|---|---|
-| **Atlas** | Lead discovery — Google Maps candidate pool, dedupe, exclusion filters |
-| **Scout** | Lead scoring — deterministic 0–100 rubric, tiers (Hot ≥90 / Warm ≥70 / Nurture) |
-| **Maps Agent** | Owns every `COMPOSIO_SEARCH_GOOGLE_MAPS` call |
-| **Sheets Agent** | Only writer to the Google Sheet (Pipeline / Score / Outreach / Followup tabs) |
-| **GitHub Agent** | Commits non-PII state, triggers workflows, guards rate limits |
-| **Composio Agent** | Tool gateway (`composio-core` SDK) + web-search enrichment |
+One **Lead Agent** (Gemini brain) owns every Telegram reply and delegates work
+to the six-agent team — every agent carries its own Gemini brain (with
+deterministic fallback when the key is absent):
+
+| Agent | Role | Gemini brain |
+|---|---|---|
+| **Lead Agent** | Orchestrator — owns every Telegram reply, assigns tasks to the six agents | intent + delegation + conversational answers |
+| **Atlas** | Lead discovery — Google Maps candidate pool, dedupe, exclusion filters | generates run-specific query strategy |
+| **Scout** | Lead scoring — deterministic 0–100 rubric, tiers (Hot ≥90 / Warm ≥70 / Nurture) | one-line rationale per scored lead |
+| **Enrichment** | Contact research — finds + verifies email / Instagram | extracts contacts from snippets & site HTML |
+| **Outreach** | Emails + IG DMs, WARM drafts → approval → send | drafts hyper-personalized copy |
+| **Followups** | Day 3/7/14 cadence on the CRM | polishes follow-up copy |
+| **Inbound** | Reads lead replies, classifies, escalates | classifies reply intent + suggested reply |
+
+Infrastructure agents (not part of the six, but part of the system):
+**Maps Agent** (owns every Maps call), **Sheets Agent** (only writer to the
+Google Sheet), **CRM Agent** (long-term lead memory), **GitHub Agent**
+(commits non-PII state, triggers workflows, guards rate limits), **Composio
+Agent** (tool gateway + web-search enrichment).
 
 ## Remote control (Telegram)
 
@@ -49,8 +60,9 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
   read/write + Actions + Workflows), `COMPOSIO_API_KEY`, `GOOGLE_SHEET_ID`.
 - **Composio connections**: `googlesheets` + `gmail` (ACTIVE for your
   connected Google account), `instagram` (connect a Meta Business account).
-- **Gemini**: `gemini-2.5-flash` needs a billing-enabled (Tier 1) project for
-  bulk drafting — free tier is ~20 requests/day.
+- **Gemini**: defaults to `gemini-flash-latest` (always-current alias; pin via
+  the `GEMINI_MODEL` repo variable). One key powers the Lead Agent brain and
+  every agent's Gemini features.
 
 ## Local development
 

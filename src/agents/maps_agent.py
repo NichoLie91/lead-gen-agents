@@ -65,9 +65,51 @@ def _slug(name: str) -> str:
 
 
 class MapsAgent:
-    def __init__(self, composio: ComposioAgent, settings: Settings):
+    def __init__(self, composio: ComposioAgent, settings: Settings, llm=None):
         self._composio = composio
         self._settings = settings
+        self._llm = llm  # Atlas's Gemini brain (optional; None -> template queries)
+
+    async def _llm_query_shapes(self) -> list[str]:
+        """Ask Gemini for up to 2 extra query templates for this run.
+
+        One call per run (bounded); returns templates with {vertical}/{city}
+        placeholders. Empty on failure/offline so discovery falls back to the
+        configured template.
+        """
+        if not self._llm or not self._llm.available:
+            return []
+        import json
+
+        prompt = (
+            "You are Atlas, the lead-discovery agent of a local business lead "
+            "generation system. Suggest 2 extra Google Maps search query "
+            "templates for finding small local businesses likely to need "
+            "AI/automation help (e.g. missed calls, manual follow-up). Use "
+            "{vertical} and {city} as placeholders. Reply with STRICT JSON only: "
+            "a JSON array of strings, e.g. [\"{vertical} near {city} that miss "
+            "calls\", ...]."
+        )
+        raw = await self._llm.complete(prompt)
+        start, depth = raw.find("["), 0
+        end = -1
+        if start != -1:
+            for i in range(start, len(raw)):
+                if raw[i] == "[":
+                    depth += 1
+                elif raw[i] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+        if end == -1:
+            return []
+        try:
+            shapes = json.loads(raw[start:end])
+        except json.JSONDecodeError:
+            return []
+        return [s for s in shapes if isinstance(s, str)
+                and "{vertical}" in s and "{city}" in s][:2]
 
     def build_queries(self, verticals: list[str], metros: list[str]) -> list[tuple[str, str, str]]:
         """Return [(query, vertical, metro)] for every (vertical x metro) pair."""
@@ -91,7 +133,21 @@ class MapsAgent:
             return self._mock_discover(verticals, metros, cap)
 
         pool: list[dict] = []
-        for query, vertical, metro in self.build_queries(verticals, metros):
+        queries = self.build_queries(verticals, metros)
+        # Atlas's Gemini brain: fold in extra query shapes (bounded to the
+        # first few pairs so we never explode the Maps call count). They are
+        # INTERLEAVED right after the first base queries so they actually run
+        # before the pool cap stops the loop (appending at the end would make
+        # them dead code — the cap is hit long before positions 60+).
+        shapes = await self._llm_query_shapes()
+        if shapes:
+            extra = []
+            for _base, vertical, metro in queries[:3]:
+                for shape in shapes:
+                    extra.append((shape.format(vertical=vertical, city=metro),
+                                  vertical, metro))
+            queries = queries[:3] + extra + queries[3:]
+        for query, vertical, metro in queries:
             results = await self._composio.search_google_maps(query, start=0)
             for item in results:
                 item["vertical"] = vertical

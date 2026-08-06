@@ -75,6 +75,7 @@ async def enrich_leads(
     leads: list[dict],
     composio: ComposioAgent,
     settings: Settings,
+    llm=None,
 ) -> list[dict]:
     """Enrich each lead with email + instagram; never invents data.
 
@@ -82,6 +83,9 @@ async def enrich_leads(
     (marked via the ``_mock`` flag only); real leads get NEEDS_ENRICHMENT flags.
     """
     out: list[dict] = []
+    # Gemini extraction fallback is budget-capped per RUN so a big pool can
+    # never trigger hundreds of LLM calls.
+    budget = {"left": 15}
     for lead in leads:
         email = lead.get("email")
         instagram = lead.get("instagram")
@@ -96,9 +100,9 @@ async def enrich_leads(
                 lead["email"] = None
                 lead["instagram"] = None
         else:
-            email = email or await _find_email(composio, lead)
+            email = email or await _find_email(composio, lead, llm=llm, budget=budget)
             lead["email"] = normalize_email(email)
-            instagram = instagram or await _find_instagram(composio, lead)
+            instagram = instagram or await _find_instagram(composio, lead, llm=llm, budget=budget)
             lead["instagram"] = normalize_instagram(instagram)
             if lead.get("website") and not lead.get("_mock"):
                 lead["_chatbot"] = await _has_chatbot(composio, lead["website"])
@@ -110,21 +114,62 @@ async def enrich_leads(
     return out
 
 
-async def _find_email(composio: ComposioAgent, lead: dict) -> str | None:
+async def _llm_extract(llm, text: str, want: str, budget: dict) -> str | None:
+    """Gemini-powered extraction fallback for emails / Instagram handles.
+
+    Used only when regex missed (no valid contact in the text). Budget-capped
+    so at most ~15 LLM calls happen per run. Returns None when offline, out of
+    budget, or Gemini finds nothing.
+    """
+    if not llm or not getattr(llm, "available", False) or budget.get("left", 0) <= 0:
+        return None
+    if not text:
+        return None
+    budget["left"] -= 1
+    prompt = (
+        f"Extract the {want} contact from this text about a local business. "
+        f'Reply STRICT JSON only: {{"{want}": "value" or null}}. '
+        f'If none exists reply {{"{want}": null}}. Do not invent.\n\nText:\n'
+        f"{text[:3000]}"
+    )
+    import json
+
+    raw = await llm.complete(prompt)
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        data = json.loads(raw[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    value = data.get(want)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
+                      budget: dict | None = None) -> str | None:
     try:
         query = f"{lead.get('name')} {lead.get('city', '')} contact email"
         results = await composio.search_web(query)
+        snippets = []
         for result in results:
             snippet = result.get("snippet") or result.get("content") or ""
+            snippets.append(snippet)
             emails = extract_emails(snippet)
             if emails:
                 return emails[0]
         # Fallback: fetch the contact page when a website exists.
+        html = ""
         if lead.get("website"):
-            html = await composio.fetch_url(lead["website"])
+            html = await composio.fetch_url(lead["website"]) or ""
             emails = extract_emails(html)
             if emails:
                 return emails[0]
+        # Gemini brain: read the raw snippets/HTML when regex missed.
+        budget = budget or {"left": 15}
+        got = await _llm_extract(llm, " ".join(snippets) + " " + html, "email", budget)
+        if got:
+            return normalize_email(got)
     except ComposioNotConfigured:
         pass
     return None
@@ -146,16 +191,24 @@ async def _has_agency_marker(composio: ComposioAgent, url: str) -> bool:
         return False
 
 
-async def _find_instagram(composio: ComposioAgent, lead: dict) -> str | None:
+async def _find_instagram(composio: ComposioAgent, lead: dict, llm=None,
+                          budget: dict | None = None) -> str | None:
     try:
         query = f"{lead.get('name')} instagram"
         results = await composio.search_web(query)
+        snippets = []
         for result in results:
             snippet = result.get("snippet") or result.get("content") or ""
+            snippets.append(snippet)
             for token in re.findall(r"@?instagram\.com/([A-Za-z0-9._]{1,30})", snippet):
                 handle = normalize_instagram(token)
                 if handle:
                     return handle
+        # Gemini brain: read the raw snippets when regex missed.
+        budget = budget or {"left": 15}
+        got = await _llm_extract(llm, " ".join(snippets), "instagram", budget)
+        if got:
+            return normalize_instagram(got)
     except ComposioNotConfigured:
         pass
     return None

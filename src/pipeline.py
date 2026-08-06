@@ -81,9 +81,11 @@ class Pipeline:
         self.sheets = SheetsAgent(self.composio, settings, self.state)
         self.crm = CrmAgent(self.sheets)
         self.approvals = ApprovalQueue(self.state)
-        self.maps = MapsAgent(self.composio, settings)
+        # Every agent carries the shared Gemini brain (falls back to
+        # deterministic behavior when the key is absent).
+        self.maps = MapsAgent(self.composio, settings, llm=self.llm)
         self.atlas = Atlas(self.maps, settings)
-        self.scout = Scout(settings)
+        self.scout = Scout(settings, llm=self.llm)
         self.notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_alert_chat_id)
 
     # ---------- main entry ----------
@@ -106,7 +108,7 @@ class Pipeline:
                 self._check_stop()
                 enriched = await self._stage_enrichment(raw, report)
                 self._check_stop()
-                scored = self._stage_scoring(enriched, report)
+                scored = await self._stage_scoring(enriched, report)
                 self._check_stop()
                 await self._stage_write_score_tab(scored)
 
@@ -193,15 +195,27 @@ class Pipeline:
         return kept
 
     async def _stage_enrichment(self, raw: list[dict], report: dict) -> list[dict]:
-        enriched = await enrich_leads(raw, self.composio, self.settings)
+        enriched = await enrich_leads(raw, self.composio, self.settings, llm=self.llm)
         with_email = sum(1 for l in enriched if l.get("email"))
         report["metrics"]["with_email"] = with_email
         report["metrics"]["needs_enrichment"] = len(enriched) - with_email
         return enriched
 
-    def _stage_scoring(self, enriched: list[dict], report: dict) -> list[dict]:
-        """Score with confirmed contact data (enrichment ran first)."""
+    async def _stage_scoring(self, enriched: list[dict], report: dict) -> list[dict]:
+        """Score with confirmed contact data (enrichment ran first).
+
+        The deterministic rubric stays authoritative; Scout's Gemini brain
+        adds a one-line rationale for the top leads (bounded, best-effort).
+        """
         scored = self.scout.run(enriched)
+        if not self.settings.dry_run:  # dry-run stays fully offline (no Gemini quota)
+            sem = asyncio.Semaphore(5)
+
+            async def _rationale(lead: dict) -> None:
+                async with sem:
+                    lead["score"]["rationale"] = await self.scout.explain(lead, lead["score"])
+
+            await asyncio.gather(*(_rationale(lead) for lead in scored[:10]))
         tiers: dict[str, int] = {}
         for lead in scored:
             tier = lead["score"]["tier"]

@@ -49,6 +49,9 @@ def build_help() -> str:
     for cmd, desc in COMMAND_HELP.items():
         lines.append(f"{cmd} — {desc}")
     lines.append("")
+    lines.append("🧠 One Lead Agent (Gemini brain) manages the six-agent team — "
+                 "Atlas (discovery) · Scout (scoring) · Enrichment (contacts) · "
+                 "Outreach (emails/IG) · Followups (cadence) · Inbound (replies).")
     lines.append("💬 You can also just type what you want in plain English — "
                  "e.g. \"run the pipeline\", \"send the follow-ups\", "
                  "\"approve all drafts\", \"what happened last run?\".")

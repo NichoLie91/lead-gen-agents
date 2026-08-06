@@ -114,8 +114,32 @@ def pick_top(
 
 
 class Scout:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, llm=None):
         self._settings = settings
+        self._llm = llm  # Scout's Gemini brain (optional; None -> no rationale)
+
+    async def explain(self, lead: dict, score: dict) -> str:
+        """One-line Gemini rationale for a lead's score/tier (bounded by the
+        caller to top leads). Empty when offline -> scores stay pure rubric."""
+        if not self._llm or not self._llm.available:
+            return ""
+        prompt = (
+            "You are Scout, the lead-scoring agent. Explain in ONE short line "
+            "(under 160 chars) why this local business lead got this score. "
+            "Use only the facts given; never invent.\n\n"
+            f"Lead: {lead.get('name')} ({lead.get('vertical')}, {lead.get('city')}) | "
+            f"rating {lead.get('rating')} | {lead.get('reviews')} reviews | "
+            f"phone: {'yes' if lead.get('phone') else 'no'} | "
+            f"email: {'yes' if lead.get('email') else 'no'} | "
+            f"website: {'yes' if lead.get('website') else 'no'} | "
+            f"instagram: {'yes' if lead.get('instagram') else 'no'}\n"
+            f"Categories: ICP {score.get('icp')}/25, Intent {score.get('intent')}/25, "
+            f"Budget {score.get('budget')}/20, Reachability {score.get('reachability')}/15, "
+            f"Timing {score.get('timing')}/15, penalties -{score.get('penalties', 0)}\n"
+            f"Total {score.get('total')} -> tier {score.get('tier')}"
+        )
+        text = await self._llm.complete(prompt)
+        return (text or "").strip()[:160]
 
     def run(self, leads: list[dict]) -> list[dict]:
         hot = int(self._settings.crit("hot_threshold", 90))
