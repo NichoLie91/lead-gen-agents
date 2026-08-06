@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 
 import pytest
 
@@ -113,3 +114,42 @@ def test_disabled_agent_is_noop(tmp_path):
     github = GitHubAgent(settings, StateStore(tmp_path))
     assert "skipped" in asyncio.run(github.trigger_pipeline("full"))
     assert asyncio.run(github.pipeline_in_progress()) is False
+
+
+def _git(*args: str, cwd) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def test_commit_state_pushes_state_files(tmp_path):
+    """commit_state must stage state/*.json (with the .json suffix) and push.
+
+    Regression test: pathspecs without the .json extension made git add fail
+    with exit 128, silently killing every cloud state commit.
+    """
+    # Working repo with an initial commit and a local bare remote to push to.
+    _git("init", "-b", "main", cwd=tmp_path)
+    _git("config", "user.email", "bot@example.com", cwd=tmp_path)
+    _git("config", "user.name", "bot", cwd=tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "approvals.json").write_text('{"v": 1}')
+    (state_dir / "last_run.json").write_text('{"status": "RUNNING"}')
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-m", "init", cwd=tmp_path)
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True)
+    _git("remote", "add", "origin", str(bare), cwd=tmp_path)
+    _git("push", "-u", "origin", "main", cwd=tmp_path)
+
+    # Simulate a state change the bot would commit (e.g. a new approval).
+    (state_dir / "approvals.json").write_text('{"v": 2}')
+    settings = Settings(repo_root=tmp_path, gh_pat="ghp_test", dry_run=False)
+    github = GitHubAgent(settings, StateStore(tmp_path))
+
+    assert github.commit_state() is True
+
+    # The remote must now carry the updated approvals.json.
+    _git("fetch", "origin", cwd=tmp_path)
+    fetched = _git("show", "origin/main:state/approvals.json", cwd=tmp_path)
+    assert fetched.strip() == '{"v": 2}'

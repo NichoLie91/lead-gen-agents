@@ -73,7 +73,11 @@ class GitHubAgent:
             if status.returncode != 0 or not status.stdout.strip():
                 return False
             targets = names or STATE_FILES
-            paths = [f"state/{t}" for t in targets if (root / "state" / f"{t}.json").exists()]
+            # NOTE: pathspecs MUST carry the .json suffix — git add fails with
+            # exit 128 on any bare path ("pathspec did not match any files"),
+            # which used to silently kill every cloud state commit.
+            paths = [f"state/{t}.json" for t in targets
+                     if (root / "state" / f"{t}.json").exists()]
             if not paths:
                 return False
             subprocess.run(["git", "-C", str(root), "add", "--", *paths],
