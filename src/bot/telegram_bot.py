@@ -80,12 +80,10 @@ async def _dispatch_command(
 
 def _pro_brain(settings: Settings) -> GeminiPool:
     """Lead Agent brain: pro model tier, load-split across both Gemini keys,
-    with per-call recording for the /usage dashboard command."""
-    usage = LLMUsage(settings.state_dir)
-    clients = [GeminiClient(settings.gemini_api_key, settings.gemini_model_pro)]
-    if settings.gemini_api_key_2:
-        clients.append(GeminiClient(settings.gemini_api_key_2, settings.gemini_model_pro))
-    return GeminiPool(clients=clients, role="pro", usage=usage)
+    with automatic FAILOVER — a quota-exhausted key or model falls through to
+    the other key, then the always-current alias — so Gemini never silently
+    stops replying. Per-call recording for the /usage dashboard command."""
+    return GeminiPool(settings, role="pro", usage=LLMUsage(settings.state_dir))
 
 
 async def _handle_free_text(

@@ -58,11 +58,13 @@ def test_pool_role_picks_model(monkeypatch):
     settings = Settings(gemini_api_key="k1", gemini_api_key_2="k2")
     GeminiPool(settings, role="pro")
     GeminiPool(settings, role="fast")
+    # fast == pro == the always-current alias -> NO fallback clients built.
     assert captured == [
         ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
         ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
     ]
-    # per-role overrides win
+    # Per-role overrides win; the always-current alias trails as the fallback
+    # MODEL for each key (chain: k1/pro-x, k2/pro-x, k1/alias, k2/alias, ...).
     settings = Settings(gemini_api_key="k1", gemini_api_key_2="k2",
                         gemini_model_fast="fast-x", gemini_model_pro="pro-x")
     captured.clear()
@@ -70,7 +72,9 @@ def test_pool_role_picks_model(monkeypatch):
     GeminiPool(settings, role="fast")
     assert captured == [
         ("k1", "pro-x"), ("k2", "pro-x"),
+        ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
         ("k1", "fast-x"), ("k2", "fast-x"),
+        ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
     ]
 
 
@@ -123,6 +127,67 @@ def test_pool_records_usage(tmp_path):
     assert [c["key"] for c in calls] == ["key1", "key2"]
     assert all(c["role"] == "pro" for c in calls)
     assert all(c["ok"] for c in calls)
+
+
+class FailClient(FakeClient):
+    """FakeClient that fails the first N calls with a given error_kind, then
+    succeeds — lets tests drive the fallback chain deterministically."""
+
+    def __init__(self, name: str, error_kind: str = "quota", fail_times: int = 99):
+        super().__init__(name)
+        self._error_kind = error_kind
+        self._fail_times = fail_times
+
+    async def complete(self, prompt: str) -> str:
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            self.error_kind = self._error_kind
+            self.last_error = "simulated failure"
+            return ""
+        return f"{self.name}:ok"
+
+
+def test_pool_falls_back_to_second_key_on_quota():
+    """key1 429s (quota) -> the chain tries key2 and succeeds."""
+    a = FailClient("A", error_kind="quota")
+    b = FailClient("B", fail_times=0)
+    pool = GeminiPool(clients=[a, b])
+    assert asyncio.run(pool.complete("x")) == "B:ok"
+    assert a.calls == 1 and b.calls == 1
+
+
+def test_pool_stops_chain_on_semantic_error():
+    """A non-retryable (other) failure stops the chain — no wasted calls."""
+    a = FailClient("A", error_kind="other")
+    b = FailClient("B")
+    pool = GeminiPool(clients=[a, b])
+    assert asyncio.run(pool.complete("x")) == ""
+    assert a.calls == 1 and b.calls == 0
+
+
+def test_pool_model_fallback_chain():
+    """Both keys quota-dead on the primary model -> the fallback MODEL wins."""
+    a = FailClient("A", error_kind="quota")
+    b = FailClient("B", error_kind="quota")
+    c = FailClient("C", fail_times=0)
+    pool = GeminiPool(clients=[a, b], fallback_clients=[c])
+    assert asyncio.run(pool.complete("x")) == "C:ok"
+    assert a.calls == 1 and b.calls == 1 and c.calls == 1
+
+
+def test_pool_records_fallback_outcome(tmp_path):
+    """The /usage dashboard records the SUCCESSFUL fallback key/model."""
+    a = FailClient("A", error_kind="quota")
+    b = FailClient("B", fail_times=0)
+    a._model = b._model = "gemini-flash-latest"
+    usage = LLMUsage(tmp_path / "state")
+    pool = GeminiPool(clients=[a, b], role="pro", usage=usage)
+    assert asyncio.run(pool.complete("x")) == "B:ok"
+    calls = usage.recent(1)
+    assert calls[0]["key"] == "key2"
+    assert calls[0]["model"] == "gemini-flash-latest"
+    assert calls[0]["role"] == "pro"
+    assert calls[0]["ok"] is True
 
 
 def test_settings_load_key2_and_role_models():

@@ -221,6 +221,9 @@ def test_dispatch_run_mode_validation(tmp_path):
 
 def test_handle_update_free_text_end_to_end(tmp_path, monkeypatch):
     settings, state, github = make_harness(tmp_path)
+    # The bot brain is a settings-built GeminiPool, so it needs a key and the
+    # pool's GeminiClient construction (in src.core.llm) is what gets stubbed.
+    settings.gemini_api_key = "test-key"
     captured: dict = {}
 
     async def fake_send(token: str, chat_id: int, text: str) -> bool:
@@ -229,7 +232,7 @@ def test_handle_update_free_text_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr("src.bot.telegram_bot.send_message", fake_send)
     monkeypatch.setattr(
-        "src.bot.telegram_bot.GeminiClient",
+        "src.core.llm.GeminiClient",
         lambda *a, **k: FakeLLM('{"action": "reply", "text": "Atlas finds leads, Scout scores them."}'),
     )
     update = {"update_id": 1,

@@ -67,7 +67,10 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
   `NEEDS_ENRICHMENT`).
 - **Gemini**: two model tiers over (up to) two keys. `GEMINI_API_KEY_2`
   (optional) round-robins every LLM call across both keys — splitting load and
-  roughly doubling the free-tier daily quota. `GEMINI_MODEL_FAST` (quick
+  roughly doubling the free-tier daily quota. Every call runs a **failover
+  chain**: key1 → key2 on the role's model, then the always-current alias on
+  both keys, so a quota-exhausted key or model falls through automatically
+  instead of silencing the bot. `GEMINI_MODEL_FAST` (quick
   judgment: Atlas queries, Scout rationale, Enrichment extraction, Followups,
   Inbound) and `GEMINI_MODEL_PRO` (heavier writing: outreach drafts + the Lead
   Agent brain) both default to `gemini-flash-latest` — the always-current

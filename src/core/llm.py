@@ -11,8 +11,32 @@ import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def classify_gemini_error(exc: Exception) -> str:
+    """Categorize a google-genai failure for the pool's fallback chain.
+
+    Returns:
+    - ``"quota"`` — 429 / RESOURCE_EXHAUSTED (retry another key or model)
+    - ``"model"`` — unknown model 404 (retry a different model name)
+    - ``"transient"`` — 5xx / timeout (retry)
+    - ``"other"`` — semantic errors (retrying never helps)
+
+    Order matters: the 429 body mentions "model: ..." but must classify as
+    quota, so quota/rate-limit markers are checked first.
+    """
+    text = str(exc).lower()
+    if any(s in text for s in ("429", "resource_exhausted", "quota", "rate limit")):
+        return "quota"
+    if ("404" in text or "not found" in text) and "model" in text:
+        return "model"
+    if any(s in text for s in ("500", "502", "503", "504", "unavailable",
+                               "deadline", "timeout", "temporarily")):
+        return "transient"
+    return "other"
 
 
 class GeminiClient:
@@ -20,6 +44,9 @@ class GeminiClient:
         self._api_key = api_key
         self._model = model
         self._client = None
+        # Failure classification from the last call, for the pool's chain.
+        self.last_error: str | None = None
+        self.error_kind: str | None = None
         if api_key:
             try:
                 from google import genai  # type: ignore[import-not-found]
@@ -33,6 +60,8 @@ class GeminiClient:
         return self._client is not None
 
     async def complete(self, prompt: str) -> str:
+        self.last_error = None
+        self.error_kind = None
         if not self._client:
             return ""
         try:
@@ -46,8 +75,10 @@ class GeminiClient:
                 contents=prompt,
             )
             return (resp.text or "").strip()
-        except Exception as exc:  # quota (429) etc. — fall back to templates
-            log.warning("Gemini call failed: %s", exc)
+        except Exception as exc:  # quota (429), model 404, transient — pool retries
+            self.last_error = str(exc)[:300]
+            self.error_kind = classify_gemini_error(exc)
+            log.warning("Gemini call failed (%s): %s", self.error_kind, self.last_error)
             return ""
 
 
@@ -106,53 +137,98 @@ class LLMUsage:
 
 
 class GeminiPool:
-    """Load-splitting Gemini wrapper — duck-types ``GeminiClient`` (has
-    ``available`` + async ``complete``) so any code that takes an LLM can take
-    a pool instead.
+    """Load-splitting + FAILOVER Gemini wrapper — duck-types ``GeminiClient``
+    (has ``available`` + async ``complete``) so any code that takes an LLM can
+    take a pool instead.
+
+    Fallback chain (per logical call, in order):
+        1. primary model on key1 -> key2      (role model: fast / pro)
+        2. fallback model on key1 -> key2     (always-current alias,
+           ``gemini_model``) — skipped when it equals the primary model
+    It advances to the next attempt on quota (429), unknown-model 404 and
+    transient errors, so a quota-exhausted key or model can never silence the
+    bot. A semantic error (``other``) stops the chain immediately — retrying
+    other keys/models would just burn the same failure.
 
     With two API keys configured (``GEMINI_API_KEY`` + ``GEMINI_API_KEY_2``)
-    each ``complete()`` round-robins to the next key, splitting the load and
-    roughly doubling the free-tier daily quota. Roles pick the model:
+    the chain also round-robins which key goes first, splitting the load and
+    roughly doubling the free-tier daily quota. Roles pick the primary model:
     "fast" (quick judgment: Atlas queries, Scout rationale, Enrichment
     extraction, Followups polish, Inbound labels) vs "pro" (heavier writing:
     outreach drafts, the Lead Agent's conversational brain).
 
-    Falls back to a single key (or fully offline) when fewer are configured.
-    Every call is recorded into the optional ``usage`` recorder (LLMUsage)
+    Every logical call is recorded once into the optional ``usage`` recorder
+    (LLMUsage) — the successful attempt's key/model, or the final failure —
     for the /usage dashboard command.
     """
 
     def __init__(self, settings=None, role: str = "fast", clients: list | None = None,
-                 usage: LLMUsage | None = None):
+                 usage: LLMUsage | None = None, fallback_clients: list | None = None):
         if clients is not None:
             self._clients = list(clients)
+            self._fallback = list(fallback_clients) if fallback_clients is not None else []
         else:
             keys = [k for k in (settings.gemini_api_key, settings.gemini_api_key_2) if k]
-            model = (settings.gemini_model_pro if role == "pro"
-                     else settings.gemini_model_fast)
-            self._clients = [GeminiClient(k, model) for k in keys]
-        self._idx = 0
+            primary = (settings.gemini_model_pro if role == "pro"
+                       else settings.gemini_model_fast)
+            self._clients = [GeminiClient(k, primary) for k in keys]
+            fallback = getattr(settings, "gemini_model", "") or ""
+            if fallback and fallback != primary:
+                self._fallback = [GeminiClient(k, fallback) for k in keys]
+            else:
+                self._fallback = []
+        self._start = 0
         self._role = role
         self._usage = usage
 
     @property
     def available(self) -> bool:
-        return any(getattr(c, "available", False) for c in self._clients)
+        return any(getattr(c, "available", False)
+                   for c in self._clients + self._fallback)
+
+    def _chain(self) -> list[tuple[Any, str]]:
+        """Ordered (client, key_label) attempts: primary model per key, then
+        fallback model per key. Rotates so key1/key2 alternate going first
+        (load splitting); the fallback model always trails its key's primary.
+        """
+        chain: list[tuple[Any, str]] = []
+        for i, client in enumerate(self._clients):
+            chain.append((client, f"key{i + 1}"))
+        for i, client in enumerate(self._fallback):
+            chain.append((client, f"key{i + 1}"))
+        step = len(self._clients)
+        if step:
+            shift = self._start % step
+            self._start += 1
+            if shift:
+                chain = chain[shift:] + chain[:shift]
+        return chain
 
     async def complete(self, prompt: str) -> str:
-        if not self._clients:
+        if not self._clients and not self._fallback:
             return ""
-        idx = self._idx % len(self._clients)
-        client = self._clients[idx]
-        self._idx += 1
         start = time.monotonic()
-        result = await client.complete(prompt)
+        last_label: str = "?"
+        last_model: str = "?"
+        for client, label in self._chain():
+            result = await client.complete(prompt)
+            if result:
+                if self._usage is not None:
+                    self._usage.record(
+                        key=label,
+                        model=getattr(client, "_model", "?"),
+                        role=self._role,
+                        ok=True,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                    )
+                return result
+            last_label, last_model = label, getattr(client, "_model", "?")
+            kind = getattr(client, "error_kind", None) or "other"
+            if kind == "other":
+                break  # semantic failure — other keys/models fail identically
         if self._usage is not None:
             self._usage.record(
-                key=f"key{idx + 1}",
-                model=getattr(client, "_model", "?"),
-                role=self._role,
-                ok=bool(result),
+                key=last_label, model=last_model, role=self._role, ok=False,
                 latency_ms=int((time.monotonic() - start) * 1000),
             )
-        return result
+        return ""
