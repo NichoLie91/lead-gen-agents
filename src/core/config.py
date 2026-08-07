@@ -54,12 +54,14 @@ class Settings:
     # returns 404 for new keys (2026-08). Pin a versioned model via
     # GEMINI_MODEL when you need reproducibility.
     gemini_model: str = "gemini-flash-latest"
-    # Per-job model tiers (probed live 2026-08 on both keys): preview/pro
-    # models are quota-blocked on free-tier keys, so both default to
-    # gemini-3.5-flash (proven on both keys). Override per role via
-    # GEMINI_MODEL_FAST / GEMINI_MODEL_PRO when a key has higher-tier access.
-    gemini_model_fast: str = "gemini-3.5-flash"   # quick judgment: Atlas/Scout/Enrichment/Followups/Inbound
-    gemini_model_pro: str = "gemini-3.5-flash"    # heavier writing: outreach drafts + Lead Agent brain
+    # Per-job model tiers: BOTH default to gemini-flash-latest — the free-tier
+    # daily quota for gemini-3.5-flash is 20 req/day/project and was exhausted
+    # on 2026-08-07 (429 RESOURCE_EXHAUSTED on both keys), while the always-
+    # current alias kept working. Preview/pro models stay quota-blocked on
+    # free-tier keys. Override per role via GEMINI_MODEL_FAST / GEMINI_MODEL_PRO
+    # when a key has higher-tier access.
+    gemini_model_fast: str = "gemini-flash-latest"  # quick judgment: Atlas/Scout/Enrichment/Followups/Inbound
+    gemini_model_pro: str = "gemini-flash-latest"   # heavier writing: outreach drafts + Lead Agent brain
     composio_api_key: str = ""
     # Tavily key for direct web extract fallback (the Composio fetch tool was
     # removed from the v3 catalog 2026-08; Tavily extract fetches lead websites
@@ -90,8 +92,8 @@ class Settings:
             # `or` guard: Actions sets these to "" when the repo variable is
             # unset, which env.get(default) would not catch.
             gemini_model=(env.get("GEMINI_MODEL") or "gemini-flash-latest"),
-            gemini_model_fast=(env.get("GEMINI_MODEL_FAST") or "gemini-3.5-flash"),
-            gemini_model_pro=(env.get("GEMINI_MODEL_PRO") or "gemini-3.5-flash"),
+            gemini_model_fast=(env.get("GEMINI_MODEL_FAST") or "gemini-flash-latest"),
+            gemini_model_pro=(env.get("GEMINI_MODEL_PRO") or "gemini-flash-latest"),
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
             tavily_api_key=env.get("TAVILY_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),

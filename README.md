@@ -70,9 +70,10 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
   roughly doubling the free-tier daily quota. `GEMINI_MODEL_FAST` (quick
   judgment: Atlas queries, Scout rationale, Enrichment extraction, Followups,
   Inbound) and `GEMINI_MODEL_PRO` (heavier writing: outreach drafts + the Lead
-  Agent brain) both default to `gemini-3.5-flash` (proven on both keys;
-  preview/pro models are quota-blocked on free-tier keys). Override the roles
-  via repo variables whenever a key gets higher-tier access.
+  Agent brain) both default to `gemini-flash-latest` — the always-current
+  alias (the `gemini-3.5-flash` free-tier quota is 20 req/day/project and
+  gets exhausted; preview/pro models stay quota-blocked on free-tier keys).
+  Override the roles via repo variables whenever a key gets higher-tier access.
 
 ## Local development
 

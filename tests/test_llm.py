@@ -59,8 +59,8 @@ def test_pool_role_picks_model(monkeypatch):
     GeminiPool(settings, role="pro")
     GeminiPool(settings, role="fast")
     assert captured == [
-        ("k1", "gemini-3.5-flash"), ("k2", "gemini-3.5-flash"),
-        ("k1", "gemini-3.5-flash"), ("k2", "gemini-3.5-flash"),
+        ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
+        ("k1", "gemini-flash-latest"), ("k2", "gemini-flash-latest"),
     ]
     # per-role overrides win
     settings = Settings(gemini_api_key="k1", gemini_api_key_2="k2",
@@ -134,5 +134,5 @@ def test_settings_load_key2_and_role_models():
     assert s.gemini_model_pro == "pro-model"
     # defaults when env vars are empty/absent (Actions sets them to "")
     s = Settings.load({"GEMINI_MODEL_FAST": "", "GEMINI_MODEL_PRO": ""})
-    assert s.gemini_model_fast == "gemini-3.5-flash"
-    assert s.gemini_model_pro == "gemini-3.5-flash"
+    assert s.gemini_model_fast == "gemini-flash-latest"
+    assert s.gemini_model_pro == "gemini-flash-latest"
