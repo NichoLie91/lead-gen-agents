@@ -115,6 +115,9 @@ class ComposioAgent:
         self._slugs: dict[str, str] = {}
         self._slugs_resolved = False
         self._account_by_toolkit: dict[str, str] = {}
+        # Per-run URL cache: chatbot/agency checks + email enrichment fetch the
+        # same lead homepage, so one Tavily extract per URL per run (quota).
+        self._url_cache: dict[str, str] = {}
         if self.connected:
             self._try_init_sdk()
 
@@ -163,8 +166,12 @@ class ComposioAgent:
         """Resolve canonical action slugs against the live v3 catalog.
 
         Fetches the catalog per toolkit so every candidate list is complete,
-        then keeps the first candidate that actually exists. Runs lazily once
-        per process before the first tool execution.
+        then keeps the first candidate that actually exists. Candidates owned
+        by a CONNECTED toolkit are preferred: e.g. web_search resolves to
+        TAVILY_TAVILY_SEARCH only when tavily is ACTIVE, otherwise it falls
+        through to SERPAPI/Serper (so a connected provider is always used over
+        a catalog-listed-but-unconnected one). Runs lazily once per process
+        before the first tool execution.
         """
         self._slugs = {}
         try:
@@ -178,11 +185,23 @@ class ComposioAgent:
                     )
                     for item in resp.json().get("items", []):
                         available.add(item.get("slug", ""))
+            if not self._account_by_toolkit:
+                await self.refresh_connections()
             for purpose, candidates in SLUG_ALIASES.items():
+                chosen = None
+                fallback = None
                 for cand in candidates:
-                    if cand in available:
-                        self._slugs[purpose] = cand
+                    if cand not in available:
+                        continue
+                    fallback = fallback or cand
+                    toolkit = self._toolkit_for(cand)
+                    if toolkit and toolkit in self._account_by_toolkit:
+                        chosen = cand
                         break
+                if chosen is None:
+                    chosen = fallback
+                if chosen:
+                    self._slugs[purpose] = chosen
             self._slugs_resolved = True
         except Exception as exc:
             log.warning("resolve_slugs failed: %s", exc)
@@ -340,12 +359,96 @@ class ComposioAgent:
         slug = self.slug("web_search")
         params = {"q": query} if "SERPAPI" in slug.upper() else {"query": query}
         resp = await self.execute_action(slug, params)
-        return resp.get("data", []) if resp.get("ok") else []
+        if not resp.get("ok"):
+            return []
+        data = resp.get("data")
+        # Composio v3 wraps Tavily output as {"response_data": {"results": [...]}};
+        # SerpAPI returns {"organic_results": [...]}. Normalize all shapes to a
+        # flat list of {title,url,snippet/content} items for enrichment.
+        if isinstance(data, dict):
+            raw = (data.get("results") or data.get("organic_results")
+                   or data.get("items"))
+            if not isinstance(raw, list):
+                inner = data.get("response_data")
+                if isinstance(inner, dict):
+                    raw = (inner.get("results") or inner.get("organic_results")
+                           or inner.get("items"))
+            data = raw
+        if not isinstance(data, list):
+            return []
+        out = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content") or item.get("snippet") or "",
+                "content": item.get("content") or item.get("snippet") or "",
+            })
+        return out
 
     async def fetch_url(self, url: str) -> str:
-        resp = await self.execute_action(self.slug("fetch_url"), {"url": url})
-        data = resp.get("data")
-        return data if isinstance(data, str) else str(data)
+        """Fetch webpage text as a string ('' on any failure).
+
+        Prefers the Composio fetch tool when it resolves (it was removed from
+        the v3 catalog 2026-08), otherwise falls back to a direct Tavily
+        ``extract`` call using TAVILY_API_KEY — proven to return raw page
+        content (emails/mailto links) for lead-website enrichment. Results are
+        cached per URL for the run so the chatbot/agency checks and email
+        enrichment share one extract call (Tavily quota).
+        """
+        cached = self._url_cache.get(url)
+        if cached is not None:
+            return cached
+        if not self._slugs_resolved:
+            await self.resolve_slugs()
+        html = ""
+        resolved = self._slugs.get("fetch_url")
+        if resolved:
+            resp = await self.execute_action(resolved, {"url": url})
+            data = resp.get("data") if resp.get("ok") else None
+            if isinstance(data, str) and data.strip() and data != "None":
+                html = data
+        if not html:
+            html = await self._tavily_extract(url) if self.settings.tavily_api_key else ""
+        self._url_cache[url] = html
+        return html
+
+    async def _tavily_extract(self, url: str) -> str:
+        """Direct Tavily extract fallback (raw page text, includes emails).
+
+        One retry on 429/5xx (dev-key rate limits) with a short sleep, matching
+        the codebase's throttle-averse style.
+        """
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        "https://api.tavily.com/extract",
+                        json={"api_key": self.settings.tavily_api_key, "urls": [url]},
+                    )
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    if attempt == 0:
+                        await asyncio.sleep(2.0)
+                        continue
+                    log.warning("Tavily extract HTTP %s for %s", resp.status_code, url)
+                    return ""
+                if resp.status_code != 200:
+                    log.warning("Tavily extract HTTP %s for %s", resp.status_code, url)
+                    return ""
+                for item in resp.json().get("results", []):
+                    raw = item.get("raw_content") or ""
+                    if raw.strip():
+                        return raw
+                return ""
+            except httpx.HTTPError as exc:
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                    continue
+                log.warning("Tavily extract failed for %s: %s", url, exc)
+                return ""
+        return ""
 
     async def gmail_send_email(self, *, to: str, subject: str, body: str) -> dict:
         return await self.execute_action(

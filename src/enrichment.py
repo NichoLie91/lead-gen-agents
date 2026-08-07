@@ -149,22 +149,44 @@ async def _llm_extract(llm, text: str, want: str, budget: dict) -> str | None:
 async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
                       budget: dict | None = None) -> str | None:
     try:
-        query = f"{lead.get('name')} {lead.get('city', '')} contact email"
-        results = await composio.search_web(query)
+        name = lead.get("name") or ""
+        city = lead.get("city") or ""
+        # Live-probed (2026-08): Tavily returns ZERO results for
+        # "...contact email" phrasing but solid hits for natural business
+        # queries. Search the business itself first, then with its vertical.
         snippets = []
-        for result in results:
-            snippet = result.get("snippet") or result.get("content") or ""
-            snippets.append(snippet)
-            emails = extract_emails(snippet)
-            if emails:
-                return emails[0]
-        # Fallback: fetch the contact page when a website exists.
+        queries = [f"{name} {city}".strip()]
+        if lead.get("vertical"):
+            queries.append(f"{name} {city} {lead['vertical']} company".strip())
+        for idx, query in enumerate(queries):
+            results = await composio.search_web(query)
+            if not results:
+                continue  # zero hits -> try the vertical-phrased query
+            for result in results:
+                snippet = result.get("snippet") or result.get("content") or ""
+                snippets.append(snippet)
+                emails = extract_emails(snippet)
+                if emails:
+                    return emails[0]
+            if idx == 0:
+                # First query already surfaced the business; the website fetch
+                # below is the real email source, so save the second search.
+                break
+        # Fallback: fetch the business website, then its /contact page — the
+        # reliable email source (Tavily extract returns raw page text).
         html = ""
         if lead.get("website"):
             html = await composio.fetch_url(lead["website"]) or ""
             emails = extract_emails(html)
             if emails:
                 return emails[0]
+            if len(html.strip()) < 200:
+                contact = await composio.fetch_url(
+                    f"{lead['website'].rstrip('/')}/contact"
+                ) or ""
+                emails = extract_emails(contact)
+                if emails:
+                    return emails[0]
         # Gemini brain: read the raw snippets/HTML when regex missed.
         budget = budget or {"left": 15}
         got = await _llm_extract(llm, " ".join(snippets) + " " + html, "email", budget)
@@ -194,7 +216,7 @@ async def _has_agency_marker(composio: ComposioAgent, url: str) -> bool:
 async def _find_instagram(composio: ComposioAgent, lead: dict, llm=None,
                           budget: dict | None = None) -> str | None:
     try:
-        query = f"{lead.get('name')} instagram"
+        query = f"{lead.get('name')} {lead.get('city', '')} instagram".strip()
         results = await composio.search_web(query)
         snippets = []
         for result in results:

@@ -61,6 +61,10 @@ class Settings:
     gemini_model_fast: str = "gemini-3.5-flash"   # quick judgment: Atlas/Scout/Enrichment/Followups/Inbound
     gemini_model_pro: str = "gemini-3.5-flash"    # heavier writing: outreach drafts + Lead Agent brain
     composio_api_key: str = ""
+    # Tavily key for direct web extract fallback (the Composio fetch tool was
+    # removed from the v3 catalog 2026-08; Tavily extract fetches lead websites
+    # for email discovery). Optional — enrichment degrades gracefully without it.
+    tavily_api_key: str = ""
     gh_pat: str = ""
     google_sheet_id: str = ""
     admin_telegram_ids: list[int] = field(default_factory=list)
@@ -89,6 +93,7 @@ class Settings:
             gemini_model_fast=(env.get("GEMINI_MODEL_FAST") or "gemini-3.5-flash"),
             gemini_model_pro=(env.get("GEMINI_MODEL_PRO") or "gemini-3.5-flash"),
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
+            tavily_api_key=env.get("TAVILY_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),
             telegram_alert_chat_id=env.get("TELEGRAM_ALERT_CHAT_ID", ""),

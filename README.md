@@ -58,9 +58,13 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
 
 - **Secrets** (GitHub Actions secrets; see `.env.example` for names):
   `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `GH_PAT` (fine-grained, Contents
-  read/write + Actions + Workflows), `COMPOSIO_API_KEY`, `GOOGLE_SHEET_ID`.
+  read/write + Actions + Workflows), `COMPOSIO_API_KEY`, `TAVILY_API_KEY`
+  (optional: direct web-extract fallback for email enrichment),
+  `GOOGLE_SHEET_ID`.
 - **Composio connections**: `googlesheets` + `gmail` (ACTIVE for your
-  connected Google account), `instagram` (connect a Meta Business account).
+  connected Google account), `instagram` (connect a Meta Business account),
+  `tavily` (web-search enrichment; without it, email extraction degrades to
+  `NEEDS_ENRICHMENT`).
 - **Gemini**: two model tiers over (up to) two keys. `GEMINI_API_KEY_2`
   (optional) round-robins every LLM call across both keys — splitting load and
   roughly doubling the free-tier daily quota. `GEMINI_MODEL_FAST` (quick

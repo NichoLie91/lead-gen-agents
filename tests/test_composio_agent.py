@@ -173,3 +173,130 @@ def test_execute_action_does_not_retry_semantic_error(monkeypatch, no_backoff_de
     assert "Sheet Pipeline not found" in result["error"]
     assert sleeps == []          # no backoff: nothing was retried
     assert client.remaining == 0  # exactly one API call was made
+
+
+# --------------------------------------------------------------------------
+# search_web response normalization (Tavily response_data wrapper)
+# --------------------------------------------------------------------------
+
+
+def test_search_web_normalizes_tavily_response_data(monkeypatch):
+    """Tavily via Composio v3 returns {"response_data": {"results": [...]}};
+    search_web must flatten it into [{snippet, content, url, title}] items."""
+    agent = make_agent()
+    agent._slugs["web_search"] = "TAVILY_TAVILY_SEARCH"
+
+    async def fake_execute(action, params):
+        assert action == "TAVILY_TAVILY_SEARCH"
+        assert params == {"query": "Plumbco Plumbing Houston"}
+        return {"ok": True, "data": {"response_data": {"results": [
+            {"title": "Plumbco", "url": "https://plumbco.example",
+             "content": "Reach us at info@plumbco.example"},
+        ]}}}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    results = asyncio.run(agent.search_web("Plumbco Plumbing Houston"))
+    assert len(results) == 1
+    assert results[0]["snippet"] == "Reach us at info@plumbco.example"
+    assert results[0]["content"] == "Reach us at info@plumbco.example"
+    assert results[0]["url"] == "https://plumbco.example"
+    assert results[0]["title"] == "Plumbco"
+
+
+def test_search_web_returns_empty_list_on_failure(monkeypatch):
+    agent = make_agent()
+    agent._slugs["web_search"] = "TAVILY_TAVILY_SEARCH"
+
+    async def fake_execute(action, params):
+        return {"ok": False, "error": "HTTP 404"}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    assert asyncio.run(agent.search_web("anything")) == []
+
+
+# --------------------------------------------------------------------------
+# fetch_url -> Tavily extract fallback (Composio fetch tool removed 2026-08)
+# --------------------------------------------------------------------------
+
+
+def test_fetch_url_falls_back_to_tavily_extract(monkeypatch):
+    """No resolvable Composio fetch tool + TAVILY_API_KEY -> direct extract."""
+    agent = ComposioAgent(Settings(composio_api_key="test-key", tavily_api_key="tvly-test"))
+    agent._slugs_resolved = True  # fetch_url not in catalog -> skip dead tool
+    client = fake_http(monkeypatch, [
+        FakeResp(200, {"results": [
+            {"url": "https://x.example",
+             "raw_content": "Contact: mailto:info@x.example for quotes"},
+        ]}),
+    ])
+
+    html = asyncio.run(agent.fetch_url("https://x.example"))
+    assert "info@x.example" in html
+    # Second fetch of the SAME url hits the per-run cache (one extract call).
+    html2 = asyncio.run(agent.fetch_url("https://x.example"))
+    assert html2 == html
+    assert client.remaining == 0  # both calls served by the single queued response
+
+
+def test_fetch_url_returns_empty_without_tavily_key(monkeypatch):
+    agent = make_agent()  # no TAVILY_API_KEY
+    agent._slugs_resolved = True
+    assert asyncio.run(agent.fetch_url("https://x.example")) == ""
+
+
+# --------------------------------------------------------------------------
+# slug resolution prefers CONNECTED toolkits
+# --------------------------------------------------------------------------
+
+
+class FakeCatalogClient:
+    """Returns per-toolkit catalog entries for GET /api/v3/tools."""
+
+    def __init__(self, toolkits: dict[str, list[str]]):
+        self._toolkits = toolkits
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, url, params=None, **kwargs):
+        slug = (params or {}).get("toolkit_slug", "")
+        items = [{"slug": s} for s in self._toolkits.get(slug, [])]
+        return FakeResp(200, {"items": items})
+
+
+def test_resolve_slugs_prefers_connected_toolkit(monkeypatch):
+    """web_search resolves to Tavily only when tavily is ACTIVE; otherwise it
+    falls through to the next connected provider (SerpAPI) instead of picking
+    a catalog-listed-but-unconnected slug that would 404 at execute time."""
+    agent = ComposioAgent(Settings(composio_api_key="test-key"))
+    agent._account_by_toolkit = {
+        "tavily": "acct-t", "serpapi": "acct-s", "google_maps": "acct-m",
+    }
+    toolkits = {
+        "tavily": ["TAVILY_TAVILY_SEARCH"],
+        "serpapi": ["SERPAPI_SEARCH", "SERPAPI_GOOGLE_LIGHT_SEARCH",
+                    "SERPAPI_GOOGLE_MAPS_SEARCH"],
+        "zenserp": ["ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH"],
+        "google_maps": ["GOOGLE_MAPS_TEXT_SEARCH"],
+        "gmail": ["GMAIL_SEND_EMAIL"],
+        "googlesheets": ["GOOGLESHEETS_BATCH_UPDATE"],
+        "instagram": ["INSTAGRAM_SEND_TEXT_MESSAGE"],
+        "github": ["GITHUB_GET_USER"],
+    }
+    monkeypatch.setattr(
+        composio_agent.httpx, "AsyncClient", lambda **kw: FakeCatalogClient(toolkits)
+    )
+
+    asyncio.run(agent.resolve_slugs())
+    assert agent.slug("web_search") == "TAVILY_TAVILY_SEARCH"
+    assert agent.slug("maps_search") == "GOOGLE_MAPS_TEXT_SEARCH"
+
+    # Tavily disconnected, SerpAPI connected -> web_search now prefers SerpAPI.
+    agent._account_by_toolkit = {"serpapi": "acct-s"}
+    agent._slugs = {}
+    agent._slugs_resolved = False
+    asyncio.run(agent.resolve_slugs())
+    assert agent.slug("web_search") == "SERPAPI_SEARCH"
