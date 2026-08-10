@@ -142,6 +142,7 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
     offset = int(state.get("telegram_offset", "offset", 0))
     deadline = time.monotonic() + settings.poll_max_wait_sec
     processed = 0
+    consecutive_failures = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -167,6 +168,16 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
             processed += 1
         if new:
             state.set("telegram_offset", "offset", offset)
+        # A dead/invalid token returns [] instantly on every call — bail after
+        # 3 consecutive empty polls instead of burning the whole window.
+        if not updates:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                log.error("getUpdates returning empty repeatedly; token issue? "
+                          "giving up this poll pass")
+                break
+        else:
+            consecutive_failures = 0
     return processed
 
 
@@ -181,6 +192,13 @@ async def main() -> int:
         )
     state = StateStore(settings.state_dir)
     github = GitHubAgent(settings, state)
+    # Keep-alive FIRST: queue the next poll run before we long-poll, so even a
+    # job timeout mid-window can't starve the chain. Guarded so the cron +
+    # keep-alive combination can't compound the queue — skip when a run is
+    # already queued or in progress.
+    if settings.poll_keepalive and not await github.bot_poll_pending():
+        msg = await github.trigger_bot_poll()
+        log.info("keep-alive: %s", msg)
     # Single pass: process whatever batch is pending, persist the offset, then
     # exit — no tight polling loop, so the Actions job always terminates.
     processed = await poll_once(settings, state, github)
@@ -190,12 +208,6 @@ async def main() -> int:
     # reach the outreach run.
     if processed and github.commit_state():
         log.info("state committed to repo")
-    # Keep-alive: GitHub throttles the * /5 cron heavily (observed gaps of
-    # 30-150 min), so re-dispatch the next poll run immediately to hold the
-    # polling chain. The bot-poll concurrency group serializes overlaps.
-    if settings.poll_keepalive:
-        msg = await github.trigger_bot_poll()
-        log.info("keep-alive: %s", msg)
     log.info("poll pass finished; processed %d update(s); exiting", processed)
     return 0
 

@@ -137,6 +137,38 @@ def test_trigger_bot_poll_403_is_readable(github, monkeypatch):
     assert "403" in reply
 
 
+def test_bot_poll_pending_true_when_run_in_progress(github, monkeypatch):
+    def fake_json():
+        return {"total_count": 1, "workflow_runs": [{"id": 1, "status": "in_progress"}]}
+
+    resp = FakeResponse(200, "")
+    resp.json = fake_json
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(resp))
+    assert asyncio.run(github.bot_poll_pending()) is True
+
+
+def test_bot_poll_pending_false_when_all_completed(github, monkeypatch):
+    def fake_json():
+        return {"total_count": 1, "workflow_runs": [{"id": 1, "status": "completed"}]}
+
+    resp = FakeResponse(200, "")
+    resp.json = fake_json
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(resp))
+    assert asyncio.run(github.bot_poll_pending()) is False
+
+
+def test_bot_poll_pending_false_on_api_error(github, monkeypatch):
+    class Boom(Exception):
+        pass
+
+    async def explode(*args, **kwargs):
+        raise Boom("rate limited")
+
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(explode))
+    # On API hiccup the guard fails OPEN so the chain keeps going.
+    assert asyncio.run(github.bot_poll_pending()) is False
+
+
 def _git(*args: str, cwd) -> str:
     return subprocess.run(["git", "-C", str(cwd), *args],
                           capture_output=True, text=True, check=True).stdout

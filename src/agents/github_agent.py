@@ -232,14 +232,44 @@ class GitHubAgent:
             f"{resp.text[:200]}"
         )
 
+    async def bot_poll_pending(self) -> bool:
+        """True when a bot-poll run is already queued or in progress.
+
+        The keep-alive guard: only dispatch the next poll when nothing is
+        pending, otherwise the cron + keep-alive combination compounds the
+        queue (each run spawns a successor AND the cron fires every 5 min).
+        """
+        if not self._enabled:
+            return False
+        slug = self._repo_slug()
+        if not slug:
+            return False
+        url = f"{GITHUB_API}/repos/{slug}/actions/workflows/{BOT_POLL_WORKFLOW}/runs"
+        try:
+            await self._limiter.reserve(points=1, method="GET", max_wait=15)
+            async with httpx.AsyncClient(timeout=DISPATCH_TIMEOUT) as client:
+                resp = await client.get(
+                    url, params={"per_page": 5},
+                    headers=self._gh_headers(),
+                )
+            for run in (resp.json().get("workflow_runs") or []):
+                if run.get("status") in ("queued", "in_progress", "requested", "waiting"):
+                    return True
+            return False
+        except Exception:
+            # On any API hiccup, assume nothing is pending so the chain keeps
+            # going rather than stalling (the concurrency group still guards
+            # against overlaps).
+            return False
+
     async def trigger_bot_poll(self) -> str:
         """Re-dispatch bot-poll.yml via GitHub's REST dispatch endpoint.
 
         Called by the poll script itself when POLL_KEEPALIVE is on: GitHub
         throttles the * /5 cron (observed gaps of 30-150 min), so each run
-        immediately queues the next one to hold a near-5-minute polling chain.
-        The bot-poll concurrency group (cancel-in-progress: false) serializes
-        any overlap. Never raises — a 403/API error only logs a warning.
+        queues the next one to hold a near-5-minute polling chain. The
+        bot-poll concurrency group (cancel-in-progress: false) serializes any
+        overlap. Never raises — a 403/API error only logs a warning.
         """
         if not self._enabled:
             return "keep-alive skipped (dry-run / GH_PAT not set)"
@@ -259,6 +289,21 @@ class GitHubAgent:
             return f"keep-alive failed: {exc} (GitHub API unreachable?)"
         if resp.status_code == 204:
             return f"next bot-poll queued on {slug}@{self._dispatch_ref()}"
+        if resp.status_code == 403:
+            return (
+                "keep-alive failed: GitHub rejected the dispatch (403). The "
+                "GH_PAT token is missing the 'workflow' scope."
+            )
+        if resp.status_code == 404:
+            return (
+                f"keep-alive failed: workflow '{BOT_POLL_WORKFLOW}' not found in "
+                f"{slug} (404)."
+            )
+        if resp.status_code == 422:
+            return (
+                f"keep-alive failed: GitHub rejected the dispatch payload (422) "
+                f"on branch '{self._dispatch_ref()}'."
+            )
         return (
             f"keep-alive failed: GitHub API returned {resp.status_code} — "
             f"{resp.text[:200]}"

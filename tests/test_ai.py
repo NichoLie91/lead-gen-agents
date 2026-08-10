@@ -295,6 +295,23 @@ def test_poll_once_loops_until_budget_and_persists_offset(tmp_path, monkeypatch)
     assert sent  # the /run reply was actually sent back
 
 
+def test_poll_once_bails_after_repeated_empty_polls(tmp_path, monkeypatch):
+    """A dead/invalid token returns [] instantly — poll_once must give up
+    after a few consecutive empties instead of spinning the whole window."""
+    settings, state, github = make_harness(tmp_path)
+    settings.poll_max_wait_sec = 60  # would spin forever without the bail
+    calls = {"n": 0}
+
+    async def fake_get_updates(token: str, offset: int, timeout: int = 50):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr("src.bot.telegram_bot.get_updates", fake_get_updates)
+    processed = asyncio.run(poll_once(settings, state, github))
+    assert processed == 0
+    assert calls["n"] <= 4  # bailed well before the 60s window
+
+
 def test_poll_once_skips_already_seen_offsets(tmp_path, monkeypatch):
     """Updates at or below the persisted offset must be skipped, never
     re-processed (this is what causes duplicate /run dispatches)."""
