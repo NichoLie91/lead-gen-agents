@@ -289,7 +289,9 @@ def test_poll_once_loops_until_budget_and_persists_offset(tmp_path, monkeypatch)
     monkeypatch.setattr("src.bot.telegram_bot.send_message", fake_send)
     processed = asyncio.run(poll_once(settings, state, github))
     assert processed == 1
-    assert state.get("telegram_offset", "offset") == 41
+    # Telegram confirms an update only when the next offset is strictly
+    # greater than it: 41 -> persisted 42 (last_update + 1).
+    assert state.get("telegram_offset", "offset") == 42
     assert sent  # the /run reply was actually sent back
 
 
@@ -316,4 +318,4 @@ def test_poll_once_skips_already_seen_offsets(tmp_path, monkeypatch):
     processed = asyncio.run(poll_once(settings, state, github))
     assert processed == 1          # only update 101 is new
     assert len(seen) == 1          # only one reply sent
-    assert state.get("telegram_offset", "offset") == 101
+    assert state.get("telegram_offset", "offset") == 102  # last_update + 1
