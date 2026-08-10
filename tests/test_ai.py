@@ -313,8 +313,8 @@ def test_poll_once_bails_after_repeated_empty_polls(tmp_path, monkeypatch):
 
 
 def test_poll_once_skips_already_seen_offsets(tmp_path, monkeypatch):
-    """Updates at or below the persisted offset must be skipped, never
-    re-processed (this is what causes duplicate /run dispatches)."""
+    """Updates STRICTLY below the persisted offset must be skipped, never
+    re-processed (this is what caused duplicate /run dispatches)."""
     settings, state, github = make_harness(tmp_path)
     settings.poll_max_wait_sec = 0.1
     state.set("telegram_offset", "offset", 100)
@@ -336,3 +336,31 @@ def test_poll_once_skips_already_seen_offsets(tmp_path, monkeypatch):
     assert processed == 1          # only update 101 is new
     assert len(seen) == 1          # only one reply sent
     assert state.get("telegram_offset", "offset") == 102  # last_update + 1
+
+
+def test_poll_once_processes_update_equal_to_offset(tmp_path, monkeypatch):
+    """Regression: an update whose update_id EQUALS the persisted offset is
+    still unconfirmed — Telegram returns updates with update_id >= offset —
+    and must be processed. The old `<=` skip left the real message 704228564
+    stuck in Telegram's queue forever after the offset was bumped to exactly
+    704228564, so Gemini never even received it."""
+    settings, state, github = make_harness(tmp_path)
+    settings.poll_max_wait_sec = 0.1
+    state.set("telegram_offset", "offset", 704228564)
+    sent: list[str] = []
+
+    async def fake_get_updates(token: str, offset: int, timeout: int = 50):
+        return [{"update_id": 704228564,
+                 "message": {"chat": {"id": 7}, "from": {"id": 7},
+                             "text": "do /run to Home contractors and landscapers"}}]
+
+    async def fake_send(token: str, chat_id: int, text: str) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr("src.bot.telegram_bot.get_updates", fake_get_updates)
+    monkeypatch.setattr("src.bot.telegram_bot.send_message", fake_send)
+    processed = asyncio.run(poll_once(settings, state, github))
+    assert processed == 1                      # the stuck update was processed
+    assert len(sent) == 1                      # and got its reply
+    assert state.get("telegram_offset", "offset") == 704228565  # last + 1

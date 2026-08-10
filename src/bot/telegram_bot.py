@@ -153,7 +153,12 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
         new = 0
         for update in updates:
             update_id = int(update.get("update_id", 0))
-            if update_id <= offset:
+            # Skip ONLY updates strictly below the offset. Telegram returns
+            # unconfirmed updates with update_id >= offset, so an update whose
+            # id EQUALS the stored offset is still unconfirmed and must be
+            # processed — skipping it (update_id <= offset) leaves it stuck in
+            # the Telegram queue forever (the stuck 704228564 /run bug).
+            if update_id < offset:
                 continue
             try:
                 await handle_update(update, settings, state, github)
