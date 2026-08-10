@@ -7,7 +7,12 @@ import asyncio
 from src.agents.github_agent import GitHubAgent
 from src.bot.ai import build_intent_prompt, classify_intent, parse_intent_response
 from src.bot.commands import build_help
-from src.bot.telegram_bot import _dispatch_command, _handle_free_text, handle_update
+from src.bot.telegram_bot import (
+    _dispatch_command,
+    _handle_free_text,
+    handle_update,
+    poll_once,
+)
 from src.core.config import Settings
 from src.core.state import StateStore
 
@@ -259,3 +264,56 @@ def test_help_mentions_plain_english():
     help_text = build_help()
     assert "plain English" in help_text
     assert "/run <mode>" in help_text
+
+
+# ---------- poll_once long-poll loop ----------
+
+def test_poll_once_loops_until_budget_and_persists_offset(tmp_path, monkeypatch):
+    """poll_once must keep long-polling until poll_max_wait_sec elapses (not a
+    single 2s blip) and persist the offset after every batch."""
+    settings, state, github = make_harness(tmp_path)
+    settings.poll_max_wait_sec = 0.25  # short window for the test
+    sent: list[str] = []
+
+    async def fake_get_updates(token: str, offset: int, timeout: int = 50):
+        # First call: one update. Then keep returning it so the loop must
+        # skip it (update_id <= offset) and keep listening until the budget.
+        return [{"update_id": 41,
+                 "message": {"chat": {"id": 7}, "from": {"id": 7}, "text": "/run"}}]
+
+    async def fake_send(token: str, chat_id: int, text: str) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr("src.bot.telegram_bot.get_updates", fake_get_updates)
+    monkeypatch.setattr("src.bot.telegram_bot.send_message", fake_send)
+    processed = asyncio.run(poll_once(settings, state, github))
+    assert processed == 1
+    assert state.get("telegram_offset", "offset") == 41
+    assert sent  # the /run reply was actually sent back
+
+
+def test_poll_once_skips_already_seen_offsets(tmp_path, monkeypatch):
+    """Updates at or below the persisted offset must be skipped, never
+    re-processed (this is what causes duplicate /run dispatches)."""
+    settings, state, github = make_harness(tmp_path)
+    settings.poll_max_wait_sec = 0.1
+    state.set("telegram_offset", "offset", 100)
+    seen: list[int] = []
+
+    async def fake_get_updates(token: str, offset: int, timeout: int = 50):
+        return [{"update_id": 99, "message": {"chat": {"id": 7},
+                                               "from": {"id": 7}, "text": "/status"}},
+                {"update_id": 101, "message": {"chat": {"id": 7},
+                                                 "from": {"id": 7}, "text": "/help"}}]
+
+    async def fake_send(token: str, chat_id: int, text: str) -> bool:
+        seen.append(1)
+        return True
+
+    monkeypatch.setattr("src.bot.telegram_bot.get_updates", fake_get_updates)
+    monkeypatch.setattr("src.bot.telegram_bot.send_message", fake_send)
+    processed = asyncio.run(poll_once(settings, state, github))
+    assert processed == 1          # only update 101 is new
+    assert len(seen) == 1          # only one reply sent
+    assert state.get("telegram_offset", "offset") == 101

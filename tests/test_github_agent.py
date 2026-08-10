@@ -113,7 +113,28 @@ def test_disabled_agent_is_noop(tmp_path):
     settings = Settings(repo_root=tmp_path, gh_pat="", dry_run=False)
     github = GitHubAgent(settings, StateStore(tmp_path))
     assert "skipped" in asyncio.run(github.trigger_pipeline("full"))
+    assert "skipped" in asyncio.run(github.trigger_bot_poll())
     assert asyncio.run(github.pipeline_in_progress()) is False
+
+
+def test_trigger_bot_poll_204_reports_queued(github, monkeypatch):
+    monkeypatch.setattr(
+        github_agent.httpx, "AsyncClient",
+        lambda **kw: FakeClient(FakeResponse(204, "")),
+    )
+    reply = asyncio.run(github.trigger_bot_poll())
+    assert "queued" in reply
+    assert "bot-poll.yml" in reply or "acme/lead-gen" in reply
+
+
+def test_trigger_bot_poll_403_is_readable(github, monkeypatch):
+    monkeypatch.setattr(
+        github_agent.httpx, "AsyncClient",
+        lambda **kw: FakeClient(FakeResponse(403, "Resource not accessible by integration")),
+    )
+    reply = asyncio.run(github.trigger_bot_poll())
+    assert "keep-alive failed" in reply
+    assert "403" in reply
 
 
 def _git(*args: str, cwd) -> str:

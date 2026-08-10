@@ -73,6 +73,10 @@ class Settings:
     telegram_alert_chat_id: str = ""
     # --- knobs ---
     poll_max_wait_sec: float = 300.0
+    # When true, each poll run re-dispatches bot-poll.yml when it exits, so
+    # the bot keeps polling even when GitHub heavily throttles the * /5 cron
+    # (observed real-world gaps of 30-150 min between scheduled runs).
+    poll_keepalive: bool = False
     pipeline_max_wait_sec: float = 3600.0
     github_ceiling_per_hour: int = 4000
     dry_run: bool = False
@@ -100,6 +104,7 @@ class Settings:
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),
             telegram_alert_chat_id=env.get("TELEGRAM_ALERT_CHAT_ID", ""),
             poll_max_wait_sec=float(env.get("POLL_MAX_WAIT_SEC", "300")),
+            poll_keepalive=env.get("POLL_KEEPALIVE", "") in ("1", "true", "True"),
             pipeline_max_wait_sec=float(env.get("PIPELINE_MAX_WAIT_SEC", "3600")),
             github_ceiling_per_hour=int(env.get("GITHUB_CEILING_PER_HOUR", "4000")),
             dry_run=env.get("DRY_RUN", "") in ("1", "true", "True"),

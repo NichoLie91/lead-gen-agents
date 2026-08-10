@@ -55,6 +55,7 @@ jobs:
           ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
           TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
           POLL_MAX_WAIT_SEC: "300"
+          POLL_KEEPALIVE: "1"   # re-dispatch bot-poll after each run; GitHub throttles the cron
 
 # State commits (offset, rate-limit budget, stop flag) happen INSIDE the poll
 # script via the GitHub Agent (github_agent.py), which configures git identity

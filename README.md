@@ -96,8 +96,11 @@ ruff check src tests
 
 ## Workflows
 
-- `.github/workflows/bot-poll.yml` — every 5 min: one `getUpdates` pass,
-  command dispatch, persisted offset, state commits.
+- `.github/workflows/bot-poll.yml` — every 5 min (cron) + self-keep-alive:
+  each run long-polls `getUpdates` for up to `POLL_MAX_WAIT_SEC` (300s),
+  dispatches commands, persists the offset, commits state, then re-dispatches
+  the next poll (`POLL_KEEPALIVE=1`) because GitHub throttles the cron to
+  gaps of 30–150 min on low-activity repos.
 - `.github/workflows/pipeline.yml` — daily at 15:00 UTC (22:00 WIB) + manual
   `workflow_dispatch` with a `mode` input (full / discovery / enrichment /
   outreach-email / outreach-ig / report).

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import httpx
 
@@ -29,11 +30,13 @@ TELEGRAM_API = "https://api.telegram.org"
 
 
 # ---------- low-level Telegram API ----------
-async def get_updates(token: str, offset: int) -> list[dict]:
-    async with httpx.AsyncClient(timeout=15) as client:
+async def get_updates(token: str, offset: int, timeout: int = 50) -> list[dict]:
+    """Long-poll getUpdates. ``timeout`` is Telegram's long-poll seconds
+    (0-50); the HTTP client allows a little extra for the server response."""
+    async with httpx.AsyncClient(timeout=max(15, timeout + 10)) as client:
         resp = await client.get(
             f"{TELEGRAM_API}/bot{token}/getUpdates",
-            params={"offset": offset, "timeout": 2,
+            params={"offset": offset, "timeout": timeout,
                     "allowed_updates": '["message"]'},
         )
         if resp.status_code != 200:
@@ -124,32 +127,42 @@ async def handle_update(
 
 # ---------- single poll pass ----------
 async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) -> int:
-    """Fetch + process ONE batch of updates, then return.
+    """Long-poll Telegram for up to ``poll_max_wait_sec`` and process every
+    update that arrives, then return.
 
-    Deliberately NOT an infinite loop: each poll pass is a short-lived job
-    (bot-poll.yml runs every 5 minutes), so after the batch is processed we
-    exit cleanly. One broken update (e.g. a GitHub 403 reply) is caught and
-    skipped so it can never abort the whole pass.
+    Deliberately bounded, NOT an infinite loop: each pass is a short-lived
+    job (bot-poll.yml), so after the listening window we exit cleanly and the
+    keep-alive dispatches the next run. One broken update (e.g. a GitHub 403
+    reply) is caught and skipped so it can never abort the pass.
     """
     token = settings.telegram_bot_token
     if not token:
         log.error("TELEGRAM_BOT_TOKEN not set")
         return 0
     offset = int(state.get("telegram_offset", "offset", 0))
-    updates = await get_updates(token, offset)
+    deadline = time.monotonic() + settings.poll_max_wait_sec
     processed = 0
-    for update in updates:
-        update_id = int(update.get("update_id", 0))
-        if update_id <= offset:
-            continue
-        try:
-            await handle_update(update, settings, state, github)
-        except Exception:  # never let one update crash the batch
-            log.exception("update %s failed", update_id)
-        offset = max(offset, update_id)
-        processed += 1
-    if processed:
-        state.set("telegram_offset", "offset", offset)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Telegram caps long-poll at 50s; use the rest of our budget per call.
+        timeout = int(min(50, max(2, remaining)))
+        updates = await get_updates(token, offset, timeout=timeout)
+        new = 0
+        for update in updates:
+            update_id = int(update.get("update_id", 0))
+            if update_id <= offset:
+                continue
+            try:
+                await handle_update(update, settings, state, github)
+            except Exception:  # never let one update crash the pass
+                log.exception("update %s failed", update_id)
+            offset = max(offset, update_id)
+            new += 1
+            processed += 1
+        if new:
+            state.set("telegram_offset", "offset", offset)
     return processed
 
 
@@ -173,6 +186,12 @@ async def main() -> int:
     # reach the outreach run.
     if processed and github.commit_state():
         log.info("state committed to repo")
+    # Keep-alive: GitHub throttles the * /5 cron heavily (observed gaps of
+    # 30-150 min), so re-dispatch the next poll run immediately to hold the
+    # polling chain. The bot-poll concurrency group serializes overlaps.
+    if settings.poll_keepalive:
+        msg = await github.trigger_bot_poll()
+        log.info("keep-alive: %s", msg)
     log.info("poll pass finished; processed %d update(s); exiting", processed)
     return 0
 

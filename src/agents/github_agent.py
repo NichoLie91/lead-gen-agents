@@ -38,6 +38,7 @@ STATE_FILES = [
 
 GITHUB_API = "https://api.github.com"
 PIPELINE_WORKFLOW = "pipeline.yml"
+BOT_POLL_WORKFLOW = "bot-poll.yml"
 DEFAULT_BRANCH = "main"
 DISPATCH_TIMEOUT = 15.0
 
@@ -203,6 +204,38 @@ class GitHubAgent:
             )
         return (
             f"trigger failed: GitHub API returned {resp.status_code} — "
+            f"{resp.text[:200]}"
+        )
+
+    async def trigger_bot_poll(self) -> str:
+        """Re-dispatch bot-poll.yml via GitHub's REST dispatch endpoint.
+
+        Called by the poll script itself when POLL_KEEPALIVE is on: GitHub
+        throttles the * /5 cron (observed gaps of 30-150 min), so each run
+        immediately queues the next one to hold a near-5-minute polling chain.
+        The bot-poll concurrency group (cancel-in-progress: false) serializes
+        any overlap. Never raises — a 403/API error only logs a warning.
+        """
+        if not self._enabled:
+            return "keep-alive skipped (dry-run / GH_PAT not set)"
+        slug = self._repo_slug()
+        if not slug:
+            return "keep-alive failed: could not determine owner/repo"
+        url = f"{GITHUB_API}/repos/{slug}/actions/workflows/{BOT_POLL_WORKFLOW}/dispatches"
+        payload = {"ref": self._dispatch_ref(), "inputs": {}}
+        try:
+            await self._limiter.reserve(points=5, method="POST", max_wait=30)
+        except RateLimitExceeded as exc:
+            return f"keep-alive failed: GitHub API rate budget exhausted ({exc})"
+        try:
+            async with httpx.AsyncClient(timeout=DISPATCH_TIMEOUT) as client:
+                resp = await client.post(url, json=payload, headers=self._gh_headers())
+        except Exception as exc:
+            return f"keep-alive failed: {exc} (GitHub API unreachable?)"
+        if resp.status_code == 204:
+            return f"next bot-poll queued on {slug}@{self._dispatch_ref()}"
+        return (
+            f"keep-alive failed: GitHub API returned {resp.status_code} — "
             f"{resp.text[:200]}"
         )
 
