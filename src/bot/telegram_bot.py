@@ -158,7 +158,11 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
                 await handle_update(update, settings, state, github)
             except Exception:  # never let one update crash the pass
                 log.exception("update %s failed", update_id)
-            offset = max(offset, update_id)
+            # Telegram confirms an update only when the NEXT offset is strictly
+            # greater than it. Storing update_id itself leaves the last update
+            # perpetually pending, so a stale repo offset (push race) re-fetches
+            # and re-runs it — the duplicate /run dispatch bug. +1 confirms it.
+            offset = max(offset, update_id + 1)
             new += 1
             processed += 1
         if new:
