@@ -105,7 +105,10 @@ class GitHubAgent:
                 log.warning("state push rejected, retrying with rebase: %s",
                             push.stderr.decode(errors="replace").strip().splitlines()[-1:])
                 rebase = subprocess.run(
-                    ["git", "-C", str(root), "pull", "--rebase", "origin", "main"],
+                    # autostash: a concurrent job may have left other state
+                    # files modified in this tree; stash them, rebase, reapply.
+                    ["git", "-C", str(root), "-c", "rebase.autoStash=true",
+                     "pull", "--rebase", "origin", "main"],
                     capture_output=True, env=self._git_env(), check=False,
                 )
                 if rebase.returncode != 0:
