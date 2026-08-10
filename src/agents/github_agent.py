@@ -97,8 +97,29 @@ class GitHubAgent:
                 capture_output=True, env=self._git_env(), check=False,
             )
             if push.returncode != 0:
-                log.warning("state push failed: %s", push.stderr.decode(errors="replace"))
-                return False
+                # Classic ephemeral-job race: another actor (a concurrent
+                # pipeline run, the keep-alive chain, the human) moved main
+                # between our checkout and push. Rebase onto the new tip and
+                # retry once — never give up and leave a stale offset that
+                # would make the next poll re-process updates.
+                log.warning("state push rejected, retrying with rebase: %s",
+                            push.stderr.decode(errors="replace").strip().splitlines()[-1:])
+                rebase = subprocess.run(
+                    ["git", "-C", str(root), "pull", "--rebase", "origin", "main"],
+                    capture_output=True, env=self._git_env(), check=False,
+                )
+                if rebase.returncode != 0:
+                    log.warning("state rebase failed: %s",
+                                rebase.stderr.decode(errors="replace")[:200])
+                    return False
+                push = subprocess.run(
+                    ["git", "-C", str(root), "push", "origin", "HEAD"],
+                    capture_output=True, env=self._git_env(), check=False,
+                )
+                if push.returncode != 0:
+                    log.warning("state push failed after rebase: %s",
+                                push.stderr.decode(errors="replace")[:200])
+                    return False
             return True
         except Exception as exc:
             log.warning("commit_state failed: %s", exc)
@@ -107,6 +128,7 @@ class GitHubAgent:
     def _git_env(self) -> dict:
         env = {
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_EDITOR": "true",   # never hang on a rebase editor prompt
             "GIT_AUTHOR_NAME": "lead-gen-agents[bot]",
             "GIT_AUTHOR_EMAIL": "lead-gen-agents[bot]@users.noreply.github.com",
             "GIT_COMMITTER_NAME": "lead-gen-agents[bot]",

@@ -174,3 +174,48 @@ def test_commit_state_pushes_state_files(tmp_path):
     _git("fetch", "origin", cwd=tmp_path)
     fetched = _git("show", "origin/main:state/approvals.json", cwd=tmp_path)
     assert fetched.strip() == '{"v": 2}'
+
+
+def test_commit_state_retries_push_with_rebase(monkeypatch, tmp_path):
+    """A rejected push ("fetch first" race with another job) must rebase and
+    retry once — never give up and leave a stale offset."""
+    import subprocess as sp
+
+    _git("init", "-b", "main", cwd=tmp_path)
+    _git("config", "user.email", "bot@example.com", cwd=tmp_path)
+    _git("config", "user.name", "bot", cwd=tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "telegram_offset.json").write_text('{"offset": 1}')
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-m", "init", cwd=tmp_path)
+    bare = tmp_path / "bare.git"
+    sp.run(["git", "init", "--bare", str(bare)], check=True)
+    _git("remote", "add", "origin", str(bare), cwd=tmp_path)
+    _git("push", "-u", "origin", "main", cwd=tmp_path)
+
+    (state_dir / "telegram_offset.json").write_text('{"offset": 2}')
+    settings = Settings(repo_root=tmp_path, gh_pat="ghp_test", dry_run=False)
+    github = GitHubAgent(settings, StateStore(tmp_path))
+
+    calls: list[list[str]] = []
+    real_run = sp.run
+    rebase_seen = {"done": False}
+
+    def fake_run(args, *a, **kw):
+        calls.append(list(args))
+        is_push = "push" in args and "origin" in args and "HEAD" in args
+        # Fail the FIRST push ("fetch first", as if another job moved main);
+        # after the pull --rebase, allow the retried push through.
+        if is_push and not rebase_seen["done"]:
+            return sp.CompletedProcess(args, 1,
+                                       b"", b"! [rejected] HEAD -> main (fetch first)\n")
+        if "pull" in args and "--rebase" in args:
+            rebase_seen["done"] = True
+        return real_run(args, *a, **kw)
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    assert github.commit_state() is True
+    assert rebase_seen["done"] is True           # a rebase was attempted
+    assert sum(1 for c in calls
+               if "push" in c and "origin" in c and "HEAD" in c) == 2
