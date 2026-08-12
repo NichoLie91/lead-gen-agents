@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 STATE_FILES = [
     "telegram_offset", "github_ratelimit", "stop_requested",
     "pipeline_running", "last_run", "dedupe", "sheet_mirror",
-    "approvals", "inbound_seen", "llm_usage",
+    "approvals", "inbound_seen", "llm_usage", "gemini_keys",
 ]
 
 GITHUB_API = "https://api.github.com"
@@ -252,7 +252,15 @@ class GitHubAgent:
                     url, params={"per_page": 5},
                     headers=self._gh_headers(),
                 )
+            # IMPORTANT: skip the run this job is EXECUTING IN. The keep-alive
+            # check runs at the start of a poll, while the current run is still
+            # "in_progress" — counting it made the guard always return True and
+            # silently killed the keep-alive chain (the bot collapsed back to
+            # the throttled * /5 cron: hourly polls instead of ~5-minute ones).
+            current = os.environ.get("GITHUB_RUN_ID", "")
             for run in (resp.json().get("workflow_runs") or []):
+                if str(run.get("id", "")) == str(current):
+                    continue
                 if run.get("status") in ("queued", "in_progress", "requested", "waiting"):
                     return True
             return False

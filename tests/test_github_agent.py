@@ -169,6 +169,49 @@ def test_bot_poll_pending_false_on_api_error(github, monkeypatch):
     assert asyncio.run(github.bot_poll_pending()) is False
 
 
+def test_bot_poll_pending_excludes_current_run(github, monkeypatch):
+    """The keep-alive guard must NOT count the run it is executing in.
+
+    Regression: the check runs at the start of a poll while THIS run is still
+    "in_progress", so counting it made bot_poll_pending() always True and the
+    keep-alive chain silently never dispatched (bot collapsed to the throttled
+    cron, ~hourly polls instead of ~5-minute ones).
+    """
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+
+    def fake_json():
+        return {"total_count": 1, "workflow_runs": [{"id": 42, "status": "in_progress"}]}
+
+    resp = FakeResponse(200, "")
+    resp.json = fake_json
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(resp))
+    assert asyncio.run(github.bot_poll_pending()) is False  # current run only
+
+    # A DIFFERENT run in progress still blocks the dispatch.
+    def fake_json2():
+        return {"total_count": 2, "workflow_runs": [
+            {"id": 42, "status": "in_progress"},
+            {"id": 43, "status": "in_progress"},
+        ]}
+
+    resp2 = FakeResponse(200, "")
+    resp2.json = fake_json2
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(resp2))
+    assert asyncio.run(github.bot_poll_pending()) is True
+
+    # A queued successor (not the current run) also blocks the dispatch.
+    def fake_json3():
+        return {"total_count": 2, "workflow_runs": [
+            {"id": 42, "status": "in_progress"},
+            {"id": 44, "status": "queued"},
+        ]}
+
+    resp3 = FakeResponse(200, "")
+    resp3.json = fake_json3
+    monkeypatch.setattr(github_agent.httpx, "AsyncClient", lambda **kw: FakeClient(resp3))
+    assert asyncio.run(github.bot_poll_pending()) is True
+
+
 def _git(*args: str, cwd) -> str:
     return subprocess.run(["git", "-C", str(cwd), *args],
                           capture_output=True, text=True, check=True).stdout
@@ -188,6 +231,7 @@ def test_commit_state_pushes_state_files(tmp_path):
     state_dir.mkdir()
     (state_dir / "approvals.json").write_text('{"v": 1}')
     (state_dir / "last_run.json").write_text('{"status": "RUNNING"}')
+    (state_dir / "gemini_keys.json").write_text('{"key1": {"failures": 1}}')
     _git("add", "-A", cwd=tmp_path)
     _git("commit", "-m", "init", cwd=tmp_path)
     bare = tmp_path / "bare.git"
@@ -195,17 +239,22 @@ def test_commit_state_pushes_state_files(tmp_path):
     _git("remote", "add", "origin", str(bare), cwd=tmp_path)
     _git("push", "-u", "origin", "main", cwd=tmp_path)
 
-    # Simulate a state change the bot would commit (e.g. a new approval).
+    # Simulate a state change the bot would commit (e.g. a new approval and a
+    # freshly parked Gemini key).
     (state_dir / "approvals.json").write_text('{"v": 2}')
+    (state_dir / "gemini_keys.json").write_text('{"key1": {"failures": 2}}')
     settings = Settings(repo_root=tmp_path, gh_pat="ghp_test", dry_run=False)
     github = GitHubAgent(settings, StateStore(tmp_path))
 
     assert github.commit_state() is True
 
-    # The remote must now carry the updated approvals.json.
+    # The remote must now carry the updated approvals.json AND gemini_keys.json
+    # (the persisted Gemini key-switch file must survive ephemeral jobs).
     _git("fetch", "origin", cwd=tmp_path)
     fetched = _git("show", "origin/main:state/approvals.json", cwd=tmp_path)
     assert fetched.strip() == '{"v": 2}'
+    fetched_keys = _git("show", "origin/main:state/gemini_keys.json", cwd=tmp_path)
+    assert fetched_keys.strip() == '{"key1": {"failures": 2}}'
 
 
 def test_commit_state_retries_push_with_rebase(monkeypatch, tmp_path):
