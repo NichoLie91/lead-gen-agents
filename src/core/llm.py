@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -167,9 +169,22 @@ class GeminiKeyState:
             self._keys = {}
 
     def _save(self) -> None:
+        """Atomic write (tempfile + os.replace) — concurrent bot-poll and
+        pipeline jobs both write this file, and a torn write would silently
+        drop the park (JSONDecodeError reset in __init__). Mirrors
+        StateStore.save(): a crashed job never corrupts state."""
         try:
-            self._path.write_text(
-                json.dumps(self._keys, indent=2), encoding="utf-8")
+            fd, tmp = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(self._keys, fh, indent=2)
+                os.replace(tmp, self._path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         except OSError:
             pass
 
