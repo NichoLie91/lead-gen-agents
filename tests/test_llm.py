@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from src.core.config import Settings
-from src.core.llm import GeminiPool, LLMUsage
+from src.core.llm import GeminiKeyState, GeminiPool, LLMUsage
 
 
 class FakeClient:
@@ -188,6 +188,96 @@ def test_pool_records_fallback_outcome(tmp_path):
     assert calls[0]["model"] == "gemini-flash-latest"
     assert calls[0]["role"] == "pro"
     assert calls[0]["ok"] is True
+
+
+# ---------- persisted key circuit breaker (quota-aware key switching) ----------
+
+
+def test_key_state_quota_sets_cooldown_and_persists(tmp_path):
+    ks = GeminiKeyState(tmp_path / "state")
+    assert ks.healthy("key1")
+    ks.on_quota("key1")
+    assert not ks.healthy("key1")
+    health = ks.health()["key1"]
+    assert health["state"] == "cooling-down"
+    assert health["failures"] == 1
+    assert health["cooldown_until"] > 0
+    # survives a fresh process-equivalent instance
+    assert not GeminiKeyState(tmp_path / "state").healthy("key1")
+
+
+def test_key_state_success_clears_cooldown(tmp_path):
+    ks = GeminiKeyState(tmp_path / "state")
+    ks.on_quota("key1")
+    ks.on_success("key1")
+    assert ks.healthy("key1")
+    assert ks.health()["key1"]["failures"] == 0
+    assert GeminiKeyState(tmp_path / "state").healthy("key1")
+
+
+def test_key_state_unknown_key_is_healthy(tmp_path):
+    ks = GeminiKeyState(tmp_path / "state")
+    assert ks.healthy("key9")  # never failed -> never parked
+    assert ks.health() == {}
+
+
+def test_pool_leads_with_healthy_key_after_quota(tmp_path):
+    """key1 429s once -> key2 succeeds -> the NEXT call leads with key2 and
+    key1 is parked (not re-tried per round-robin) until its cooldown passes."""
+    a = FailClient("A", error_kind="quota", fail_times=1)
+    b = FailClient("B", fail_times=0)
+    ks = GeminiKeyState(tmp_path / "state")
+    pool = GeminiPool(clients=[a, b], key_state=ks)
+    assert asyncio.run(pool.complete("x")) == "B:ok"  # quota -> fallback
+    assert ks.health()["key1"]["state"] == "cooling-down"
+    assert asyncio.run(pool.complete("y")) == "B:ok"
+    assert asyncio.run(pool.complete("z")) == "B:ok"
+    assert a.calls == 1  # key1 never re-tried while cooling down
+    assert b.calls == 3
+
+
+def test_pool_parks_exhausted_key_until_cooldown(tmp_path):
+    """A key that stays exhausted is parked for the whole cooldown — no wasted
+    429 attempts on every round-robin cycle."""
+    a = FailClient("A", error_kind="quota", fail_times=99)
+    b = FailClient("B", fail_times=0)
+    pool = GeminiPool(clients=[a, b],
+                      key_state=GeminiKeyState(tmp_path / "state"))
+    for _ in range(4):
+        assert asyncio.run(pool.complete("x")) == "B:ok"
+    assert a.calls == 1  # only the very first attempt; parked afterwards
+    assert b.calls == 4
+
+
+def test_pool_retries_cooled_key_after_cooldown_expires(tmp_path):
+    """When the cooldown passes, round-robin resumes and the key is tried again
+    (a quota hit is not a permanent ban)."""
+    a = FailClient("A", error_kind="quota", fail_times=1)
+    b = FailClient("B", fail_times=0)
+    ks = GeminiKeyState(tmp_path / "state", cooldown_sec=-1)  # expires instantly
+    pool = GeminiPool(clients=[a, b], key_state=ks)
+    asyncio.run(pool.complete("x"))  # A quota'd once, B ok
+    asyncio.run(pool.complete("y"))  # round-robin -> B leads, ok
+    asyncio.run(pool.complete("z"))  # round-robin -> A leads again, succeeds
+    assert a.calls == 2
+    assert asyncio.run(pool.complete("w")) in ("A:ok", "B:ok")
+
+
+def test_key_switch_persists_across_pool_instances(tmp_path):
+    """The switch survives ephemeral jobs: a brand-new pool (fresh process
+    equivalent) reads the parked key from state and never tries it first."""
+    a = FailClient("A", error_kind="quota", fail_times=99)
+    b = FailClient("B", fail_times=0)
+    pool1 = GeminiPool(clients=[a, b],
+                       key_state=GeminiKeyState(tmp_path / "state"))
+    assert asyncio.run(pool1.complete("x")) == "B:ok"  # A parked
+    # Fresh pool in a new "job": same state dir -> key1 still parked.
+    c = FailClient("A2", error_kind="quota", fail_times=99)
+    d = FailClient("B2", fail_times=0)
+    pool2 = GeminiPool(clients=[c, d],
+                       key_state=GeminiKeyState(tmp_path / "state"))
+    assert asyncio.run(pool2.complete("y")) == "B2:ok"
+    assert c.calls == 0  # parked key never tried first
 
 
 def test_settings_load_key2_and_role_models():

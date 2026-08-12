@@ -136,6 +136,80 @@ class LLMUsage:
         }
 
 
+class GeminiKeyState:
+    """Persisted per-key health: quota cooldown + failure counts (circuit breaker).
+
+    The bot runs as ephemeral GitHub Actions jobs (each bot-poll / pipeline run
+    is a fresh process), so an in-memory "key1 is exhausted" decision would be
+    forgotten the moment the job exits. This file-backed tracker is what makes
+    the key switch REAL: when a key hits its quota the pool records a cooldown
+    here, and every later call — including calls in entirely new jobs — leads
+    with the healthy key until the cooldown expires.
+
+    PII-SAFE (spec 11): stores only key aliases ("key1"/"key2"), a cooldown
+    timestamp and failure counts — never prompts, key material or lead data.
+    Written to ``state/gemini_keys.json`` and committed with the other state
+    files.
+    """
+
+    COOLDOWN_SEC = 900  # Gemini free-tier quota resets ~hourly; 15 min is plenty
+
+    def __init__(self, state_dir, cooldown_sec: float = COOLDOWN_SEC):
+        self._path = Path(state_dir) / "gemini_keys.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._cooldown_sec = float(cooldown_sec)
+        self._keys: dict[str, dict] = {}
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._keys = data
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._keys = {}
+
+    def _save(self) -> None:
+        try:
+            self._path.write_text(
+                json.dumps(self._keys, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def on_success(self, key: str) -> None:
+        """A call on this key succeeded — clear its cooldown/failures."""
+        if key in self._keys:
+            self._keys[key].pop("cooldown_until", None)
+            self._keys[key]["failures"] = 0
+            self._save()
+
+    def on_quota(self, key: str) -> None:
+        """This key 429'd — park it behind the healthy key until the cooldown
+        passes, so the other key carries the load and the exhausted key is not
+        hammered on every call."""
+        entry = self._keys.setdefault(key, {"failures": 0})
+        entry["failures"] = int(entry.get("failures", 0)) + 1
+        entry["cooldown_until"] = time.time() + self._cooldown_sec
+        self._save()
+
+    def healthy(self, key: str, now: float | None = None) -> bool:
+        """True when the key is not in cooldown (unknown keys are healthy)."""
+        now = time.time() if now is None else now
+        entry = self._keys.get(key) or {}
+        until = float(entry.get("cooldown_until", 0) or 0)
+        return until <= now
+
+    def health(self) -> dict:
+        """Snapshot for the /usage dashboard: per-key state + failure count."""
+        now = time.time()
+        out: dict[str, dict] = {}
+        for key, entry in self._keys.items():
+            until = float(entry.get("cooldown_until", 0) or 0)
+            out[key] = {
+                "state": "healthy" if until <= now else "cooling-down",
+                "failures": int(entry.get("failures", 0)),
+                "cooldown_until": until,
+            }
+        return out
+
+
 class GeminiPool:
     """Load-splitting + FAILOVER Gemini wrapper — duck-types ``GeminiClient``
     (has ``available`` + async ``complete``) so any code that takes an LLM can
@@ -152,7 +226,11 @@ class GeminiPool:
 
     With two API keys configured (``GEMINI_API_KEY`` + ``GEMINI_API_KEY_2``)
     the chain also round-robins which key goes first, splitting the load and
-    roughly doubling the free-tier daily quota. Roles pick the primary model:
+    roughly doubling the free-tier daily quota. When a key actually hits its
+    quota it is parked via ``GeminiKeyState`` (state/gemini_keys.json) so the
+    OTHER key leads every subsequent call — and the switch persists across the
+    ephemeral GitHub Actions jobs that run the bot and the pipeline. Roles pick
+    the primary model:
     "fast" (quick judgment: Atlas queries, Scout rationale, Enrichment
     extraction, Followups polish, Inbound labels) vs "pro" (heavier writing:
     outreach drafts, the Lead Agent's conversational brain).
@@ -163,7 +241,8 @@ class GeminiPool:
     """
 
     def __init__(self, settings=None, role: str = "fast", clients: list | None = None,
-                 usage: LLMUsage | None = None, fallback_clients: list | None = None):
+                 usage: LLMUsage | None = None, fallback_clients: list | None = None,
+                 key_state: GeminiKeyState | None = None):
         if clients is not None:
             self._clients = list(clients)
             self._fallback = list(fallback_clients) if fallback_clients is not None else []
@@ -180,6 +259,11 @@ class GeminiPool:
         self._start = 0
         self._role = role
         self._usage = usage
+        # Persisted circuit breaker: parks a quota-exhausted key so the healthy
+        # key leads — across calls AND across ephemeral job processes.
+        self._key_state = key_state
+        if self._key_state is None and settings is not None:
+            self._key_state = GeminiKeyState(settings.state_dir)
 
     @property
     def available(self) -> bool:
@@ -202,6 +286,14 @@ class GeminiPool:
             self._start += 1
             if shift:
                 chain = chain[shift:] + chain[:shift]
+        if self._key_state is not None:
+            # Circuit breaker: a key in cooldown (just hit its quota) moves to
+            # the BACK of the chain, so the healthy key leads every attempt
+            # until the cooldown expires — no wasted 429 calls per round-robin.
+            healthy = [c for c in chain if self._key_state.healthy(c[1])]
+            cooling = [c for c in chain if not self._key_state.healthy(c[1])]
+            if cooling:
+                chain = healthy + cooling
         return chain
 
     async def complete(self, prompt: str) -> str:
@@ -213,6 +305,8 @@ class GeminiPool:
         for client, label in self._chain():
             result = await client.complete(prompt)
             if result:
+                if self._key_state is not None:
+                    self._key_state.on_success(label)
                 if self._usage is not None:
                     self._usage.record(
                         key=label,
@@ -224,6 +318,9 @@ class GeminiPool:
                 return result
             last_label, last_model = label, getattr(client, "_model", "?")
             kind = getattr(client, "error_kind", None) or "other"
+            if self._key_state is not None and kind == "quota":
+                # Park this key behind the healthy one until its cooldown passes.
+                self._key_state.on_quota(label)
             if kind == "other":
                 break  # semantic failure — other keys/models fail identically
         if self._usage is not None:

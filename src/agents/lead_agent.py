@@ -33,7 +33,7 @@ from src.approvals import ApprovalQueue
 from src.bot.ai import RUN_MODES, classify_intent
 from src.bot.commands import build_help, format_status, parse_command
 from src.core.config import Settings
-from src.core.llm import GeminiClient, GeminiPool, LLMUsage
+from src.core.llm import GeminiClient, GeminiKeyState, GeminiPool, LLMUsage
 from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -185,6 +185,20 @@ class LeadAgent:
         totals = usage.totals(len(calls))
         by_key = " · ".join(f"{k}={v}" for k, v in sorted(totals["by_key"].items()))
         lines.append(f"Totals: {by_key} · ok={totals['ok']} · failed={totals['failed']}")
+        # Circuit-breaker status: which key is leading and which is parked.
+        try:
+            health = GeminiKeyState(self.settings.state_dir).health()
+            if health:
+                parts = []
+                for key in sorted(health):
+                    h = health[key]
+                    if h["state"] == "healthy":
+                        parts.append(f"{key} ✅ healthy")
+                    else:
+                        parts.append(f"{key} ⏳ cooling ({h['failures']}×429)")
+                lines.append("Key status: " + " · ".join(parts))
+        except Exception as exc:
+            log.warning("key status lookup failed: %s", exc)
         return "\n".join(lines)
 
     # ---------- approval flow (Outreach agent, Step 04) ----------
