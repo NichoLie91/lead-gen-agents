@@ -30,32 +30,94 @@ TELEGRAM_API = "https://api.telegram.org"
 
 
 # ---------- low-level Telegram API ----------
+# Transport errors MUST never crash the poll job: a transient ConnectError /
+# ReadTimeout on 2026-08-14 (run 31766417723) propagated uncaught out of
+# get_updates, failed the whole bot-poll job, and broke the keep-alive chain.
+# Both helpers retry transient failures (transport errors + 429/5xx) with
+# backoff and degrade to [] / False on final failure instead of raising.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_SEC = 1.5
+
+
+async def _retry_sleep(attempt: int) -> None:
+    """Exponential backoff: 1.5s, 3s before the retry at ``attempt`` 0/1."""
+    await asyncio.sleep(_RETRY_BASE_SEC * (2 ** attempt))
+
+
+def _transient_status(code: int) -> bool:
+    """429 (flood control) and 5xx (server hiccup) are worth a retry."""
+    return code == 429 or code >= 500
+
+
 async def get_updates(token: str, offset: int, timeout: int = 50) -> list[dict]:
     """Long-poll getUpdates. ``timeout`` is Telegram's long-poll seconds
-    (0-50); the HTTP client allows a little extra for the server response."""
-    async with httpx.AsyncClient(timeout=max(15, timeout + 10)) as client:
-        resp = await client.get(
-            f"{TELEGRAM_API}/bot{token}/getUpdates",
-            params={"offset": offset, "timeout": timeout,
-                    "allowed_updates": '["message"]'},
-        )
-        if resp.status_code != 200:
-            log.warning("getUpdates failed: %s %s", resp.status_code, resp.text[:200])
+    (0-50); the HTTP client allows a little extra for the server response.
+
+    Resilient: transient failures (ConnectError, ReadTimeout, 429, 5xx) are
+    retried with backoff; a permanent failure logs and returns [] so the poll
+    pass ends cleanly and the keep-alive chain dispatches the next run."""
+    url = f"{TELEGRAM_API}/bot{token}/getUpdates"
+    params = {"offset": offset, "timeout": timeout,
+              "allowed_updates": '["message"]'}
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=max(15, timeout + 10)) as client:
+                resp = await client.get(url, params=params)
+        except httpx.HTTPError as exc:
+            if attempt < _RETRY_ATTEMPTS - 1:
+                log.warning("getUpdates transport error (attempt %d): %s",
+                            attempt + 1, exc)
+                await _retry_sleep(attempt)
+                continue
+            log.warning("getUpdates unreachable after %d attempts: %s",
+                        _RETRY_ATTEMPTS, exc)
             return []
-        return resp.json().get("result", [])
+        if resp.status_code == 200:
+            return resp.json().get("result", [])
+        if _transient_status(resp.status_code) and attempt < _RETRY_ATTEMPTS - 1:
+            log.warning("getUpdates HTTP %s (attempt %d); retrying",
+                        resp.status_code, attempt + 1)
+            await _retry_sleep(attempt)
+            continue
+        log.warning("getUpdates failed: %s %s", resp.status_code, resp.text[:200])
+        return []
+    return []
 
 
 async def send_message(token: str, chat_id: int, text: str) -> bool:
     for chunk in _chunk(text, 4096):
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{TELEGRAM_API}/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": chunk},
-            )
-        if resp.status_code != 200:
-            log.warning("sendMessage failed: %s", resp.text[:200])
+        if not await _send_chunk(token, chat_id, chunk):
             return False
     return True
+
+
+async def _send_chunk(token: str, chat_id: int, text: str) -> bool:
+    """Send one <=4096-char chunk with retry/backoff; never raises."""
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(url, json=payload)
+        except httpx.HTTPError as exc:
+            if attempt < _RETRY_ATTEMPTS - 1:
+                log.warning("sendMessage transport error (attempt %d): %s",
+                            attempt + 1, exc)
+                await _retry_sleep(attempt)
+                continue
+            log.warning("sendMessage unreachable after %d attempts: %s",
+                        _RETRY_ATTEMPTS, exc)
+            return False
+        if resp.status_code == 200:
+            return True
+        if _transient_status(resp.status_code) and attempt < _RETRY_ATTEMPTS - 1:
+            log.warning("sendMessage HTTP %s (attempt %d); retrying",
+                        resp.status_code, attempt + 1)
+            await _retry_sleep(attempt)
+            continue
+        log.warning("sendMessage failed: %s", resp.text[:200])
+        return False
+    return False
 
 
 def _chunk(text: str, size: int) -> list[str]:
@@ -149,7 +211,11 @@ async def poll_once(settings: Settings, state: StateStore, github: GitHubAgent) 
             break
         # Telegram caps long-poll at 50s; use the rest of our budget per call.
         timeout = int(min(50, max(2, remaining)))
-        updates = await get_updates(token, offset, timeout=timeout)
+        try:
+            updates = await get_updates(token, offset, timeout=timeout)
+        except Exception:  # final safety net: never let the network layer fail the job
+            log.exception("getUpdates raised; treating as empty poll")
+            updates = []
         new = 0
         for update in updates:
             update_id = int(update.get("update_id", 0))
