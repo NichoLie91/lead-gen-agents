@@ -451,18 +451,34 @@ class ComposioAgent:
         return ""
 
     async def gmail_send_email(self, *, to: str, subject: str, body: str) -> dict:
+        # Composio v3 GMAIL_SEND_EMAIL requires `recipient_email` + `body`
+        # (verified against the live tool schema). The old v1 shape
+        # (userId/to) was rejected with HTTP 400 "fields are missing:
+        # {'recipient_email'}" — the reason every send bounced.
         return await self.execute_action(
             self.slug("send_email"),
-            {"userId": "me", "to": [to], "subject": subject, "body": body},
+            {"recipient_email": to, "subject": subject, "body": body},
         )
 
     async def gmail_create_draft(self, *, to: str, subject: str, body: str) -> dict:
+        # v3 GMAIL_CREATE_EMAIL_DRAFT requires recipient_email/subject/body.
         return await self.execute_action(
             self.slug("create_draft"),
-            {"userId": "me", "to": [to], "subject": subject, "body": body},
+            {"recipient_email": to, "subject": subject, "body": body},
         )
 
     async def ig_send_dm(self, *, recipient_id: str, message: str) -> dict:
+        # v3 INSTAGRAM_SEND_TEXT_MESSAGE requires a numeric PSID (IG-scoped
+        # id). Enrichment only collects the @handle, and the v3 catalog has no
+        # handle->ID resolver, so a non-numeric recipient can NEVER send — fail
+        # fast with a readable error instead of a 400 round-trip.
+        if not str(recipient_id).strip().isdigit():
+            return {
+                "ok": False, "action": self.slug("ig_send_dm"),
+                "error": ("recipient_id must be a numeric Instagram PSID, got "
+                           f"'{recipient_id}' (handle); no handle->ID resolver "
+                           "in the v3 catalog"),
+            }
         return await self.execute_action(
             self.slug("ig_send_dm"),
             {"recipient_id": recipient_id, "text": message},

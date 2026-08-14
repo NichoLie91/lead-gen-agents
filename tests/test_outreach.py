@@ -52,6 +52,15 @@ def test_ig_failure_reason_mapping():
     assert Pipeline._ig_failure_reason("rate limited, try later") == "other"
 
 
+def test_ig_failure_reason_no_psid_tooling_gap():
+    # Enrichment collects the @handle; the DM tool needs a numeric PSID and
+    # there is no handle->ID resolver — a tooling gap, counted as a SKIP.
+    assert Pipeline._ig_failure_reason(
+        "recipient_id must be a numeric Instagram PSID, got 'bluecreek'") == "no_psid"
+    assert Pipeline._ig_failure_reason(
+        'Param recipient[id] must be a valid ID string (e.g., "123")') == "no_psid"
+
+
 # ---------- per-lead personalization facts (doc 4: never a pasted template) ----------
 
 def test_lead_facts_carry_concrete_details():

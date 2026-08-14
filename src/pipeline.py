@@ -94,6 +94,13 @@ IG_WINDOW_HINTS = (
     "24 hour", "24-hour", "24h", "allowed window", "messaging window",
     "window has", "outside the window", "once the recipient",
 )
+# Enrichment collects the @handle; INSTAGRAM_SEND_TEXT_MESSAGE needs a numeric
+# PSID and the v3 catalog has no handle->ID resolver. Treat that tooling gap as
+# a SKIP (doc outcome vocabulary), never a failed send.
+IG_NO_PSID_HINTS = (
+    "numeric instagram psid", "valid id string", "recipient[id]",
+    "handle; no handle->id resolver",
+)
 
 
 class StopRequested(Exception):
@@ -580,6 +587,9 @@ class Pipeline:
                     elif reason == "window":
                         status, note = "Skipped — IG 24h window", err or "outside Meta's 24h window"
                         skipped += 1
+                    elif reason == "no_psid":
+                        status, note = "Skipped — IG no PSID", err or "handle needs resolving to a numeric PSID"
+                        skipped += 1
                     else:
                         status, note = "Failed", err or "unknown IG error"
                         failed += 1
@@ -738,6 +748,8 @@ class Pipeline:
             return "cold_start"
         if any(h in lowered for h in IG_WINDOW_HINTS):
             return "window"
+        if any(h in lowered for h in IG_NO_PSID_HINTS):
+            return "no_psid"
         return "other"
 
     async def _ig_halt_record(self, reason: str) -> None:

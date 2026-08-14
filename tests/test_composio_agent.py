@@ -245,6 +245,90 @@ def test_fetch_url_returns_empty_without_tavily_key(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# v3 Gmail payload shape (recipient_email, not userId/to)
+# --------------------------------------------------------------------------
+
+
+def test_gmail_send_email_uses_v3_recipient_email(monkeypatch):
+    """Composio v3 GMAIL_SEND_EMAIL requires `recipient_email` — the old
+    userId/to shape was rejected with 400 "fields are missing:
+    {'recipient_email'}", which is why every send bounced."""
+    agent = make_agent()
+    agent._slugs["send_email"] = "GMAIL_SEND_EMAIL"
+    captured: dict = {}
+
+    async def fake_execute(action, params):
+        captured["action"] = action
+        captured["params"] = params
+        return {"ok": True, "data": {"message_id": "m1"}}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    result = asyncio.run(agent.gmail_send_email(
+        to="info@plumbco.example", subject="Hi", body="Hello"))
+    assert result["ok"] is True
+    assert captured["action"] == "GMAIL_SEND_EMAIL"
+    assert captured["params"]["recipient_email"] == "info@plumbco.example"
+    assert "to" not in captured["params"]       # v1 field must be gone
+    assert "userId" not in captured["params"]   # v1 field must be gone
+
+
+def test_gmail_create_draft_uses_v3_fields(monkeypatch):
+    agent = make_agent()
+    agent._slugs["create_draft"] = "GMAIL_CREATE_EMAIL_DRAFT"
+    captured: dict = {}
+
+    async def fake_execute(action, params):
+        captured["params"] = params
+        return {"ok": True, "data": {"id": "d1"}}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    asyncio.run(agent.gmail_create_draft(
+        to="info@plumbco.example", subject="Hi", body="Hello"))
+    assert captured["params"]["recipient_email"] == "info@plumbco.example"
+    assert captured["params"]["subject"] == "Hi"
+    assert "to" not in captured["params"]
+    assert "userId" not in captured["params"]
+
+
+# --------------------------------------------------------------------------
+# IG DM requires a numeric PSID (handle cannot send)
+# --------------------------------------------------------------------------
+
+
+def test_ig_send_dm_rejects_handle_recipient(monkeypatch):
+    """INSTAGRAM_SEND_TEXT_MESSAGE needs a numeric PSID; a @handle can never
+    send. Fail fast with a readable error instead of a 400 round-trip."""
+    agent = make_agent()
+    agent._slugs["ig_send_dm"] = "INSTAGRAM_SEND_TEXT_MESSAGE"
+    called: list[str] = []
+
+    async def fake_execute(action, params):
+        called.append(action)
+        return {"ok": True}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    result = asyncio.run(agent.ig_send_dm(recipient_id="bluecreek", message="Hi"))
+    assert result["ok"] is False
+    assert "numeric Instagram PSID" in result["error"]
+    assert called == []  # never hit the API
+
+
+def test_ig_send_dm_accepts_numeric_psid(monkeypatch):
+    agent = make_agent()
+    agent._slugs["ig_send_dm"] = "INSTAGRAM_SEND_TEXT_MESSAGE"
+    captured: dict = {}
+
+    async def fake_execute(action, params):
+        captured["params"] = params
+        return {"ok": True, "data": {}}
+
+    monkeypatch.setattr(agent, "execute_action", fake_execute)
+    result = asyncio.run(agent.ig_send_dm(recipient_id="123456789", message="Hi"))
+    assert result["ok"] is True
+    assert captured["params"]["recipient_id"] == "123456789"
+
+
+# --------------------------------------------------------------------------
 # slug resolution prefers CONNECTED toolkits
 # --------------------------------------------------------------------------
 
