@@ -21,6 +21,7 @@ import logging
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import ClassVar
 
 from src.agents.atlas import Atlas
 from src.agents.composio_agent import ComposioAgent
@@ -79,10 +80,20 @@ AI_TELL_PATTERNS = (
     ("cliche 'it is important to note'", "it is important to note"),
     ("cliche 'at the end of the day'", "at the end of the day"),
     ("cliche 'seamless'", "seamless"), ("cliche 'game-changer'", "game-changer"),
-    ("cliche 'cutting-edge'", "cutting-edge"), ("cliche 'leverage'", "leverage"),
-    ("cliche 'unlock'", "unlock"), ("cliche 'streamline'", "streamline"),
+    ("cliche 'cutting-edge'", "cutting-edge"),    ("cliche 'leverage'", "leverage"), ("cliche 'unlock'", "unlock"), ("cliche 'streamline'", "streamline"),
     ("cliche 'elevate'", "elevate"), ("cliche 'revolutionize'", "revolutionize"),
+    ("cliche 'synergy'", "synergy"), ("cliche 'circle back'", "circle back"),
+    ("cliche 'best-in-class'", "best-in-class"),
+    ("opener 'I hope this email finds you well'", "I hope this email finds you well"),
+    ("opener 'I came across'", "I came across"),
 )
+
+# Cold-email skill: anti-spam trigger words, banned from body copy entirely.
+SPAM_WORDS = (
+    "free", "guarantee", "risk-free", "buy now", "special promotion",
+    "increase revenue", "urgent", "save money", "click here", "best price",
+)
+
 
 # IG failure reasons mapped to the doc's outcome vocabulary.
 IG_COLD_START_HINTS = (
@@ -108,6 +119,18 @@ class StopRequested(Exception):
 
 
 class Pipeline:
+    # Cold-email skill: short, boring, internal-looking subject lines (2-4
+    # words), varied per lead so no two emails sound identical (spintax
+    # variation). Keyed by vertical; defaults to the generic pool.
+    SUBJECT_POOL: ClassVar[dict[str, tuple[str, ...]]] = {
+        "plumber": ("After-hours calls", "Missed calls", "Weekend calls", "Booking follow-up"),
+        "hvac": ("After-hours calls", "Peak-season calls", "Missed calls", "Booking follow-up"),
+        "cleaning": ("Quote follow-up", "Review replies", "New clients", "Booking follow-up"),
+        "mechanic": ("Missed calls", "Estimate follow-up", "Service reminders", "Booking follow-up"),
+        "dental": ("Recall reminders", "New-patient follow-up", "No-show follow-up", "Booking follow-up"),
+        "default": ("Missed calls", "Quick question", "Follow up", "After-hours calls"),
+    }
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.state = StateStore(settings.state_dir)
@@ -644,21 +667,39 @@ class Pipeline:
             hook = "no website at all, so jobs are slipping away today"
         return hook or "manual follow-up is eating time"
 
+    @classmethod
+    def _pick_subject(cls, lead: dict) -> str:
+        """2-4 word, boring, internal-looking subject (cold-email skill).
+
+        Picks deterministically from the vertical's pool (hashed on the lead
+        name) so every lead gets a varied subject and the same lead always
+        gets the same one across runs (spintax variation).
+        """
+        vertical = str(lead.get("vertical") or "default").lower()
+        pool = cls.SUBJECT_POOL.get(vertical, cls.SUBJECT_POOL["default"])
+        key = lead.get("name") or lead.get("address") or ""
+        return pool[sum(ord(c) for c in key) % len(pool)]
+
     async def _draft_email(self, lead: dict) -> tuple[str, str]:
+        """Cold-email skill: <100 words, 3-4 sentences, personalized opening,
+        one low-friction open-ended CTA, no links, no spam trigger words.
+
+        The template only carries the skeleton; the humanizer pass (below)
+        rewrites it per-lead so it reads like a human wrote it, then the
+        skill rules are enforced programmatically.
+        """
         name = lead.get("name", "the business")
-        subject = f"Quick question for {name}"[:50]
+        subject = self._pick_subject(lead)
         facts = self._lead_facts(lead)
         rating = lead.get("rating") or "4"
         hook = self._hook(lead)
         city = lead.get("city", "your city")
         body = (
-            f"Hi {name} team. I help {lead.get('vertical', 'service')} businesses "
-            f"in {city} cut the busywork that eats the week. I saw your {rating} star "
-            f"profile and one thing stood out: {hook}.\n\n"
-            f"I don't sell a generic chatbot. I scope custom AI builds for the exact "
-            f"workflow, ship fast, and only charge if it pays for itself. Worth 15 "
-            f"minutes this week to compare notes?\n\n"
-            f"Reply \"stop\" to opt out."
+            f"Hi {name} team. I noticed your {rating} star profile in {city} and "
+            f"one thing stood out: {hook}. I build custom AI systems for "
+            f"{lead.get('vertical', 'service')} businesses, scoped to your workflow "
+            f"and only charged if they pay for themselves. Worth a brief chat next "
+            f"week?\n\nReply \"stop\" to opt out."
         )
         if self.llm.available:
             body = await self._humanize(facts, body)
@@ -686,40 +727,145 @@ class Pipeline:
         return "\n".join(facts)
 
     async def _humanize(self, facts: str, draft: str) -> str:
-        """Gemini rewrite with the doc's writer rules, then ENFORCE them: lint
-        the result, rewrite once if it still violates, sanitize as last resort.
-        Always keeps the CAN-SPAM opt-out line and the real facts."""
+        """Humanizer skill: Gemini rewrite, then ENFORCE both skill rule sets.
+
+        Enforced programmatically (never trust the model): under 100 words,
+        3-4 sentences, no spam trigger words, no links, personalized opening,
+        low-friction CTA question, CAN-SPAM opt-out line, no AI tells. On any
+        violation, one targeted rewrite; sanitize the template as last resort.
+        """
         prompt = (
-            "Rewrite this cold outreach email as a thoughtful human copywriter. "
-            "Personalize it using the FACTS below: reference one concrete detail "
-            "about this specific business (its rating without a website, no online "
-            "booking, etc.) so it can't be a pasted template. Rules: vary sentence "
-            "length dramatically; active voice; confident, direct tone. STRICTLY NO "
-            "em-dashes, no AI cliches (delve, testament, beacon, tapestry, furthermore, "
-            "'in today's world', 'it is important to note', 'at the end of the day'), "
-            "no three-part lists, no hype. Keep the CAN-SPAM opt-out line "
-            "'Reply \"stop\" to opt out.' and keep every fact accurate. Under 1000 chars.\n\n"
+            "Rewrite this cold outreach email as a sharp human copywriter. "
+            "Write like a busy human executive, not a marketing bot. Personalize "
+            "it with the FACTS below: open by referencing ONE concrete detail "
+            "about this specific business (its rating, no website, no online "
+            "booking) so it can't be a pasted template. Rules: 3-4 sentences, "
+            "under 100 words total. Short, punchy sentences under 10 words where "
+            "possible. Active voice. No links, no attachments, no urgency. End "
+            "with a single low-friction, open-ended CTA question like 'Worth a "
+            "brief chat next week?' or 'Open to exploring this?' - never a booking "
+            "link or a hard pitch. STRICTLY NO em-dashes, no AI cliches (delve, "
+            "testament, beacon, tapestry, furthermore, moreover, plethora, synergy, "
+            "'in today's world', 'it is important to note', 'at the end of the day', "
+            "'I hope this email finds you well', 'I came across'), no three-part "
+            "lists, no hype, no spam words (free, guarantee, risk-free, buy now, "
+            "urgent, save money, best price). Vary your vocabulary and sentence "
+            "structures so it doesn't sound like a template. Keep the CAN-SPAM "
+            "opt-out line 'Reply \"stop\" to opt out.' and keep every fact accurate.\n\n"
             f"FACTS:\n{facts}\n\nDRAFT:\n{draft}"
         )
         polished = (await self.llm.complete(prompt) or "").strip()
         if not polished:
             return self._sanitize_ai_tells(draft)
-        violations = self._lint_ai_tells(polished)
+        violations = self._lint_email_rules(polished)
         if not violations:
-            # CAN-SPAM guard: never send without the opt-out line (doc 4).
-            return (polished[:1000] if self._has_opt_out(polished)
-                    else self._sanitize_ai_tells(draft))
-        # Doc rule: rewrite immediately when banned content appears.
+            return polished[:1000]
+        # Skill rule: rewrite immediately when the rules are violated.
         again = (await self.llm.complete(
-            "Your email still violates the writer rules. Fix ALL of these and "
+            "Your email still violates the cold-email rules. Fix ALL of these and "
             "return the full rewritten email, keeping the opt-out line and facts:\n"
             + "\n".join(f"- {v}" for v in violations)
             + f"\n\nFACTS:\n{facts}\n\nDRAFT:\n{polished}"
         ) or "").strip()
-        if again and not self._lint_ai_tells(again) and self._has_opt_out(again):
+        if again and not self._lint_email_rules(again):
             return again[:1000]
         # Last resort: sanitize the (compliant) template draft.
         return self._sanitize_ai_tells(again or draft)
+
+    @classmethod
+    def _lint_spam_words(cls, text: str) -> list[str]:
+        """Return every banned spam trigger word found (regex word boundaries,
+        so 'buy now,' and 'Urgent:' still match)."""
+        lowered = (text or "").lower()
+        return [w for w in SPAM_WORDS
+                if re.search(rf"\b{re.escape(w)}\b", lowered)]
+
+    @classmethod
+    def _count_sentences(cls, text: str) -> int:
+        """Sentence count excluding the CAN-SPAM opt-out line (that is a
+        legal requirement, not copy). Splits on terminal punctuation followed
+        by whitespace and a capital letter so decimals like '4.8' don't count."""
+        text = (text or "").strip()
+        if cls._has_opt_out(text):
+            # The opt-out is a single short sentence; drop its contribution.
+            text = re.sub(r"\s*reply\s+\".*?stop.*?\".*?opt\s+out\.?", "",
+                          text, flags=re.IGNORECASE)
+        return len(re.findall(r"[.!?]+\s+[A-Z0-9]", text)) + 1
+
+    @classmethod
+    def _lint_email_rules(cls, text: str) -> list[str]:
+        """Full cold-email + humanizer rule check. Returns every violation."""
+        text = (text or "").strip()
+        violations: list[str] = []
+        words = len(text.split())
+        if words > 100:
+            violations.append(f"{words} words (max 100)")
+        sentences = cls._count_sentences(text)
+        if not 3 <= sentences <= 4:
+            violations.append(f"{sentences} sentences (want 3-4)")
+        if re.search(r"https?://|www\.", text):
+            violations.append("contains a link")
+        if "?" not in text:
+            violations.append("no low-friction CTA question")
+        if not cls._has_opt_out(text):
+            violations.append("missing CAN-SPAM opt-out line")
+        violations.extend(cls._lint_ai_tells(text))
+        for w in cls._lint_spam_words(text):
+            violations.append(f"spam trigger word '{w}'")
+        return violations
+
+    @classmethod
+    def rate_email(cls, subject: str, body: str, facts: str = "") -> tuple[int, list[str]]:
+        """Rate a draft 1-10 against the cold-email + humanizer skills.
+
+        Returns (score, notes). Used to gate quality and to report a concrete
+        rating for each email (owner-facing metric)."""
+        score = 10
+        notes: list[str] = []
+        body = (body or "").strip()
+        words = len(body.split())
+        if words > 100:
+            score -= 2
+            notes.append(f"{words} words (max 100)")
+        sentences = cls._count_sentences(body)
+        if not 3 <= sentences <= 4:
+            score -= 1
+            notes.append(f"{sentences} sentences (want 3-4)")
+        if re.search(r"https?://|www\.", body):
+            score -= 1
+            notes.append("contains a link")
+        if "?" not in body:
+            score -= 1
+            notes.append("no low-friction CTA question")
+        if not cls._has_opt_out(body):
+            score -= 1
+            notes.append("missing CAN-SPAM opt-out line")
+        tells = cls._lint_ai_tells(body)
+        if tells:
+            score -= 2
+            notes.append(f"AI tells: {', '.join(tells)}")
+        for w in cls._lint_spam_words(body):
+            score -= 1
+            notes.append(f"spam trigger word '{w}'")
+        subj_words = len((subject or "").split())
+        if not 2 <= subj_words <= 4:
+            score -= 1
+            notes.append(f"subject {subj_words} words (want 2-4)")
+        # Personalization: the body must reference a concrete lead detail
+        # (business name, city, or rating) so it isn't a pasted template.
+        if facts:
+            name = next((l.split(":", 1)[1].strip() for l in facts.splitlines()
+                         if l.lower().startswith("business:")), "")
+            city = next((l.split(":", 1)[1].strip() for l in facts.splitlines()
+                         if l.lower().startswith("city:")), "")
+            rating = next((l.split(":", 1)[1].split("(")[0].strip()
+                           for l in facts.splitlines()
+                           if l.lower().startswith("google rating:")), "")
+            tokens = [t for t in (name, city, rating) if t]
+            if not any(t in body for t in tokens):
+                score -= 1
+                notes.append("no concrete lead detail referenced (template-y)")
+        return max(1, score), notes
 
     @staticmethod
     def _has_opt_out(text: str) -> bool:
