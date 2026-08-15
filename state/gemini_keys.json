@@ -1,6 +1,7 @@
 {
   "key1": {
-    "failures": 0
+    "failures": 1,
+    "cooldown_until": 1786808520.807692
   },
   "key2": {
     "failures": 0
