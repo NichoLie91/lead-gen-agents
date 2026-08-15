@@ -1,15 +1,24 @@
 {
-  "run_id": "27e2f631",
-  "mode": "inbound",
-  "started_at": "2026-08-15T06:47:44.933077+00:00",
+  "run_id": "5358a335",
+  "mode": "outreach-email",
+  "started_at": "2026-08-15T07:42:02.425237+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "inbound_scanned": 10,
-    "inbound_processed": 0,
-    "inbound_owner_notified": 0,
-    "inbound_auto_replied": 0,
-    "sheet_tabs_written": 1,
+    "candidates": 7,
+    "with_email": 0,
+    "needs_enrichment": 7,
+    "tiers": {
+      "WARM": 5
+    },
+    "emails_sent": 0,
+    "emails_bounced": 0,
+    "emails_drafted": 0,
+    "emails_skipped": 5,
+    "emails_approved_sent": 0,
+    "emails_approved_failed": 0,
+    "emails_rejected": 0,
+    "sheet_tabs_written": 3,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-15T06:47:52.599339+00:00"
+  "finished_at": "2026-08-15T07:44:15.259783+00:00"
 }
