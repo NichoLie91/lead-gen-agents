@@ -54,8 +54,7 @@ def build_followup_body(lead: dict, step_index: int) -> str:
             f"Hi {name} team — circling back on my note from a few days ago. "
             f"I help {city} service businesses automate the follow-up busywork "
             f"that slips through the cracks. I don't know if the timing is "
-            f"right, but if a 15-minute call would help, I'll make it easy.\n\n"
-            f"Reply \"stop\" to opt out."
+            f"right, but if a 15-minute call would help, I'll make it easy."
         )
     if step_index == 1:  # Day 7 case study
         return (
@@ -63,14 +62,13 @@ def build_followup_body(lead: dict, step_index: int) -> str:
             f"business cut missed-call losses by automating after-hours "
             f"follow-up, and the first build paid for itself in the first "
             f"month. I can send the numbers if useful.\n\n"
-            f"Still happy to compare notes this week. Reply \"stop\" to opt out."
+            f"Still happy to compare notes this week."
         )
     # Day 14 final ask
     return (
         f"Hi {name} — last note from me. If the timing's off, no problem at "
         f"all: I'll close the loop here. If you do want a second opinion on "
-        f"the missed-call problem, my calendar's open this week.\n\n"
-        f"Reply \"stop\" to opt out."
+        f"the missed-call problem, my calendar's open this week."
     )
 
 

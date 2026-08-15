@@ -245,9 +245,8 @@ game-changer, cutting-edge, leverage, unlock, streamline, elevate, revolutionize
 balanced three-part lists; overly symmetrical paragraphs; sterile or over-enthusiastic tone.
 
 **Email rules:** subject < 50 chars; body < 1,000 chars; ≤3 uses of "I"; no emojis, no
-attachments, no calendar links in the first email; ends with **`Reply "stop" to opt out.`**
-(CAN-SPAM, required, never omitted); mention business name, city, star rating, and one
-concrete observed bottleneck (from the per-lead facts — never invented).
+attachments, no calendar links in the first email; mention business name, city, star rating,
+and one concrete observed bottleneck (from the per-lead facts — never invented).
 
 **Email decision tree per lead:**
 1. No confirmed email → nothing (no send, no draft); mark `NEEDS_ENRICHMENT`.
@@ -280,7 +279,7 @@ sends/bounces recorded as `BOUNCED` in the sheet.
 
 - Intervals: **Day 3 (bump), Day 7 (case study), Day 14 (final ask)**. Eligible statuses:
   CONTACTED, REPLIED-INTERESTED, QUESTION. After all 3 → status `LOST`.
-- Bodies are templates polished by Gemini (same writer rules; keep the opt-out line).
+- Bodies are templates polished by Gemini (same writer rules).
 - Caps shared with email (50/run). Sends are recorded on the CRM + timeline.
 
 ### 7.7 Inbound replies

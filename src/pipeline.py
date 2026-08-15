@@ -447,7 +447,7 @@ class Pipeline:
             if self.fast_llm.available:
                 polished = await self.fast_llm.complete(
                     "Rewrite this short follow-up to sound human: no em-dashes, "
-                    "no AI cliches, under 900 chars, keep the opt-out line. "
+                    "no AI cliches, under 900 chars. "
                     f"Original:\n\n{body}"
                 )
                 if polished:
@@ -699,7 +699,7 @@ class Pipeline:
             f"one thing stood out: {hook}. I build custom AI systems for "
             f"{lead.get('vertical', 'service')} businesses, scoped to your workflow "
             f"and only charged if they pay for themselves. Worth a brief chat next "
-            f"week?\n\nReply \"stop\" to opt out."
+            f"week?"
         )
         if self.llm.available:
             body = await self._humanize(facts, body)
@@ -731,8 +731,8 @@ class Pipeline:
 
         Enforced programmatically (never trust the model): under 100 words,
         3-4 sentences, no spam trigger words, no links, personalized opening,
-        low-friction CTA question, CAN-SPAM opt-out line, no AI tells. On any
-        violation, one targeted rewrite; sanitize the template as last resort.
+        low-friction CTA question, no AI tells. On any violation, one targeted
+        rewrite; sanitize the template as last resort.
         """
         prompt = (
             "Rewrite this cold outreach email as a sharp human copywriter. "
@@ -750,8 +750,7 @@ class Pipeline:
             "'I hope this email finds you well', 'I came across'), no three-part "
             "lists, no hype, no spam words (free, guarantee, risk-free, buy now, "
             "urgent, save money, best price). Vary your vocabulary and sentence "
-            "structures so it doesn't sound like a template. Keep the CAN-SPAM "
-            "opt-out line 'Reply \"stop\" to opt out.' and keep every fact accurate.\n\n"
+            "structures so it doesn't sound like a template. Keep every fact accurate.\n\n"
             f"FACTS:\n{facts}\n\nDRAFT:\n{draft}"
         )
         polished = (await self.llm.complete(prompt) or "").strip()
@@ -763,7 +762,7 @@ class Pipeline:
         # Skill rule: rewrite immediately when the rules are violated.
         again = (await self.llm.complete(
             "Your email still violates the cold-email rules. Fix ALL of these and "
-            "return the full rewritten email, keeping the opt-out line and facts:\n"
+            "return the full rewritten email, keeping every fact accurate:\n"
             + "\n".join(f"- {v}" for v in violations)
             + f"\n\nFACTS:\n{facts}\n\nDRAFT:\n{polished}"
         ) or "").strip()
@@ -782,14 +781,9 @@ class Pipeline:
 
     @classmethod
     def _count_sentences(cls, text: str) -> int:
-        """Sentence count excluding the CAN-SPAM opt-out line (that is a
-        legal requirement, not copy). Splits on terminal punctuation followed
-        by whitespace and a capital letter so decimals like '4.8' don't count."""
+        """Sentence count. Splits on terminal punctuation followed by
+        whitespace and a capital letter so decimals like '4.8' don't count."""
         text = (text or "").strip()
-        if cls._has_opt_out(text):
-            # The opt-out is a single short sentence; drop its contribution.
-            text = re.sub(r"\s*reply\s+\".*?stop.*?\".*?opt\s+out\.?", "",
-                          text, flags=re.IGNORECASE)
         return len(re.findall(r"[.!?]+\s+[A-Z0-9]", text)) + 1
 
     @classmethod
@@ -807,8 +801,6 @@ class Pipeline:
             violations.append("contains a link")
         if "?" not in text:
             violations.append("no low-friction CTA question")
-        if not cls._has_opt_out(text):
-            violations.append("missing CAN-SPAM opt-out line")
         violations.extend(cls._lint_ai_tells(text))
         for w in cls._lint_spam_words(text):
             violations.append(f"spam trigger word '{w}'")
@@ -837,9 +829,6 @@ class Pipeline:
         if "?" not in body:
             score -= 1
             notes.append("no low-friction CTA question")
-        if not cls._has_opt_out(body):
-            score -= 1
-            notes.append("missing CAN-SPAM opt-out line")
         tells = cls._lint_ai_tells(body)
         if tells:
             score -= 2
@@ -866,11 +855,6 @@ class Pipeline:
                 score -= 1
                 notes.append("no concrete lead detail referenced (template-y)")
         return max(1, score), notes
-
-    @staticmethod
-    def _has_opt_out(text: str) -> bool:
-        lowered = (text or "").lower()
-        return "reply" in lowered and "stop" in lowered
 
     @classmethod
     def _lint_ai_tells(cls, text: str) -> list[str]:

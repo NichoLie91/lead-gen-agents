@@ -43,9 +43,9 @@ def test_is_due_stops_at_max_followups():
     assert is_due(row) is False
 
 
-def test_bodies_include_name_and_opt_out():
+def test_bodies_include_name():
     body = build_followup_body({"Name": "Acme Plumbing", "City": "Houston"}, 0)
     assert "Acme Plumbing" in body
-    assert "stop" in body
-    assert "stop" in build_followup_body({}, 1)
-    assert "stop" in build_followup_body({}, 2)
+    assert "Houston" in body
+    assert build_followup_body({}, 1)
+    assert build_followup_body({}, 2)

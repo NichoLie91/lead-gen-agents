@@ -17,16 +17,9 @@ def test_lint_detects_banned_punctuation_and_cliches():
     assert any("in today's world" in t for t in tells)
 
 
-def test_has_opt_out_guard():
-    assert Pipeline._has_opt_out('Reply "stop" to opt out.') is True
-    assert Pipeline._has_opt_out("reply stop to opt out") is True
-    assert Pipeline._has_opt_out("no opt out here") is False
-
-
 def test_lint_passes_human_copy():
     clean = ("Hi Blue Creek team. I noticed your 4.8 star profile in Tampa "
-             "but no website at all. Who answers your after-hours calls? "
-             "Reply stop to opt out.")
+             "but no website at all. Who answers your after-hours calls?")
     assert Pipeline._lint_ai_tells(clean) == []
 
 
@@ -143,8 +136,7 @@ def test_lint_spam_words_detects_banned_triggers():
 def test_lint_email_rules_full_check():
     good = ("Hi Blue Creek team. I noticed your 4.8 star profile in Tampa "
             "and no website at all. I build AI systems that answer those "
-            "missed calls for you. Worth a brief chat next week?\n\n"
-            'Reply "stop" to opt out.')
+            "missed calls for you. Worth a brief chat next week?")
     assert Pipeline._lint_email_rules(good) == []
     bad = ("We leverage synergy to increase revenue, click here for a free "
            "ebook today, urgent! Don't miss out. It is important to note "
@@ -155,13 +147,10 @@ def test_lint_email_rules_full_check():
     assert "spam trigger word" in joined
     assert "ai tells" in joined or "cliche" in joined or "em-dash" in joined
     assert "contains a link" in joined
-    assert "missing can-spam" in joined
 
 
-def test_lint_email_rules_counts_sentences_without_opt_out():
-    # 3 copy sentences + the opt-out line = 3, not 4.
-    body = ("Hi there. Your 4.8 stars in Tampa caught my eye. Worth a chat?\n\n"
-            'Reply "stop" to opt out.')
+def test_lint_email_rules_counts_sentences():
+    body = ("Hi there. Your 4.8 stars in Tampa caught my eye. Worth a chat?")
     assert Pipeline._count_sentences(body) == 3
     assert Pipeline._lint_email_rules(body) == []
 
@@ -171,8 +160,7 @@ def test_lint_email_rules_counts_sentences_without_opt_out():
 def test_rate_email_perfect_draft_scores_10():
     body = ("Hi Blue Creek team. I noticed your 4.8 star profile in Tampa and "
             "no website at all. I build AI systems that answer those missed "
-            "calls for you. Worth a brief chat next week?\n\n"
-            'Reply "stop" to opt out.')
+            "calls for you. Worth a brief chat next week?")
     facts = ("Business: Blue Creek Plumbing\nCity: Tampa\n"
              "Google rating: 4.8 (120 reviews)")
     score, notes = Pipeline.rate_email("Missed calls", body, facts)
@@ -193,8 +181,7 @@ def test_rate_email_penalizes_violations():
 
 def test_rate_email_flags_unpersonalized_template():
     body = ("Hi there. I noticed your profile and one thing stood out. "
-            "I build custom AI systems for businesses. Worth a chat?\n\n"
-            'Reply "stop" to opt out.')
+            "I build custom AI systems for businesses. Worth a chat?")
     facts = ("Business: Blue Creek Plumbing\nCity: Tampa\n"
              "Google rating: 4.8 (120 reviews)")
     score, notes = Pipeline.rate_email("Quick question", body, facts)
