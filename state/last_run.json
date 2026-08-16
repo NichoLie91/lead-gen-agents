@@ -1,15 +1,30 @@
 {
-  "run_id": "af3f6ea6",
-  "mode": "inbound",
-  "started_at": "2026-08-16T14:28:35.149501+00:00",
+  "run_id": "188c06e1",
+  "mode": "full",
+  "started_at": "2026-08-16T15:26:52.918854+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "inbound_scanned": 10,
-    "inbound_processed": 0,
-    "inbound_owner_notified": 0,
-    "inbound_auto_replied": 0,
-    "sheet_tabs_written": 1,
+    "candidates": 2,
+    "with_email": 0,
+    "needs_enrichment": 2,
+    "tiers": {
+      "WARM": 1
+    },
+    "emails_sent": 0,
+    "emails_bounced": 0,
+    "emails_drafted": 0,
+    "emails_skipped": 1,
+    "emails_approved_sent": 0,
+    "emails_approved_failed": 0,
+    "emails_rejected": 0,
+    "ig_sent": 0,
+    "ig_skipped": 1,
+    "ig_failed": 0,
+    "ig_queued": 0,
+    "ig_skipped_no_email": 0,
+    "pipeline_rows": 1,
+    "sheet_tabs_written": 5,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-16T14:28:41.811736+00:00"
+  "finished_at": "2026-08-16T15:30:26.988108+00:00"
 }
