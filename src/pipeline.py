@@ -152,6 +152,11 @@ class Pipeline:
         self.atlas = Atlas(self.maps, settings)
         self.scout = Scout(settings, llm=self.fast_llm)
         self.notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_alert_chat_id)
+        # Leads an email was attempted for THIS run (sent/drafted/NEEDS_ENRICHMENT).
+        # ANCHOR's IG rule: a DM is only eligible when an email attempt exists.
+        # Initialized here AND reset per-run in run() so stage-level tests (and
+        # any direct stage call) have a working set.
+        self._email_attempted: set[str] = set()
 
     # ---------- main entry ----------
     async def run(self, mode: str = "full") -> dict:
@@ -315,6 +320,24 @@ class Pipeline:
         cap = min(int(self.settings.crit("emails_per_run_max", EMAIL_CAP_ABSOLUTE)), EMAIL_CAP_ABSOLUTE)
         sent, drafted, skipped, bounced = 0, 0, 0, 0
         new_rows: list[list] = []
+        # Leads already handled by a previous run must NEVER be drafted again:
+        # an identical second NEEDS_APPROVAL row would otherwise accumulate in
+        # the table and, once approved, send a duplicate email (the OA Plumbing
+        # 3x bug — three accumulated drafts were all sent in one pass).
+        # Dedupe against the previous Outreach table (by Lead ID) AND the CRM
+        # status, so re-discovered leads can't queue a second draft.
+        already_handled: set[str] = set()
+        previous = await self.sheets.read_tab("Outreach")
+        if previous and previous[0]:
+            prev_header = [str(h).strip() for h in previous[0]]
+            try:
+                prev_lid_i = prev_header.index("Lead ID")
+            except ValueError:
+                prev_lid_i = None
+            if prev_lid_i is not None:
+                for row in previous[1:]:
+                    if prev_lid_i < len(row) and row[prev_lid_i]:
+                        already_handled.add(row[prev_lid_i])
         for idx, lead in enumerate(leads, start=1):
             lid = lead_id(lead.get("name", ""), lead.get("address", ""))
             name = lead.get("name", "")
@@ -323,6 +346,16 @@ class Pipeline:
             # Every lead counts as an email attempt (sent / drafted / NEEDS
             # ENRICHMENT) for the IG eligibility rule (doc 4).
             self._email_attempted.add(lid)
+            # Skip re-drafting leads that already have an Outreach row or a
+            # CONTACTED/DRAFTED CRM status from a previous run.
+            crm_row = self.crm.find_by_lead_id(lid)
+            if lid in already_handled or (
+                    crm_row and crm_row.get("Status") in (STATUS_CONTACTED, STATUS_DRAFTED)):
+                skipped += 1
+                new_rows.append(self._outreach_row(
+                    idx, name, lid, email or "", "email", "", "", "SKIP",
+                    "Already drafted/contacted in a previous run"))
+                continue
             if not email:
                 skipped += 1
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
@@ -389,6 +422,11 @@ class Pipeline:
         approved = self.approvals.approved()
         rejected = self.approvals.rejected()
         sent = failed = rejected_count = 0
+        # Send each approved lead AT MOST ONCE per pass. Accumulated duplicate
+        # NEEDS_APPROVAL rows for the same lead (e.g. OA Plumbing: drafted 3
+        # times before the draft guard existed) must not produce 3 emails —
+        # the first row sends, every later row for that lid is marked SKIP.
+        sent_lids: set[str] = set()
         for row in raw[1:]:
             lid = row[col["Lead ID"]] if col.get("Lead ID") is not None and col["Lead ID"] < len(row) else ""
             status = row[col["Status"]] if col.get("Status") is not None and col["Status"] < len(row) else ""
@@ -399,6 +437,12 @@ class Pipeline:
                 rejected_count += 1
                 continue
             if lid not in approved:
+                continue
+            # Duplicate draft row for a lead already sent this pass (or already
+            # CONTACTED in the CRM): flip to SKIP so it never re-sends.
+            if lid in sent_lids or (
+                    (crm := self.crm.find_by_lead_id(lid)) and crm.get("Status") == STATUS_CONTACTED):
+                row[col["Status"]] = "SKIP"
                 continue
             email = row[col["Email"]] if col.get("Email") is not None and col["Email"] < len(row) else ""
             subject = row[col["Subject"]] if col.get("Subject") is not None and col["Subject"] < len(row) else ""
@@ -416,6 +460,7 @@ class Pipeline:
                 if col.get("Send Date") is not None and col["Send Date"] < len(row):
                     row[col["Send Date"]] = datetime.now(UTC).date().isoformat()
                 sent += 1
+                sent_lids.add(lid)
                 self._email_attempted.add(lid)  # an approved send is an email attempt
                 self.crm.set_status(lid, STATUS_CONTACTED)
                 self.crm.set_last_contact(lid)
