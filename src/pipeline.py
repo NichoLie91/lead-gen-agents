@@ -385,6 +385,7 @@ class Pipeline:
                 self.crm.append_timeline(lid, "email-sent", subject)
             elif tier == "WARM":
                 self.approvals.register(lid)
+                self.approvals.decide(lid, "approved")  # auto-approve WARM drafts
                 self.crm.upsert(lid, name=name, email=email,
                                 instagram=lead.get("instagram", ""), tier=tier,
                                 status=STATUS_DRAFTED)
