@@ -1,4 +1,4 @@
-"""Tests for email_verify module (ZeroBounce integration)."""
+"""Tests for email_verify module (pure SMTP verification, no API key)."""
 from __future__ import annotations
 
 import asyncio
@@ -8,10 +8,12 @@ import pytest
 from src.email_verify import (
     ROLE_PREFIXES,
     STATUS_CATCH_ALL,
+    STATUS_DISPOSABLE,
     STATUS_ERROR,
     STATUS_FORMAT_INVALID,
+    STATUS_NO_MX,
     STATUS_ROLE_BASED,
-    STATUS_SPAM_TRAP,
+    STATUS_SMTP_REJECTED,
     STATUS_VERIFIED,
     VerifyResult,
     _looks_valid,
@@ -52,8 +54,8 @@ class TestIsSendable:
     def test_catch_all_is_sendable(self):
         assert is_sendable(STATUS_CATCH_ALL) is True
 
-    def test_spamtrap_not_sendable(self):
-        assert is_sendable(STATUS_SPAM_TRAP) is False
+    def test_disposable_not_sendable(self):
+        assert is_sendable(STATUS_DISPOSABLE) is False
 
     def test_format_invalid_not_sendable(self):
         assert is_sendable(STATUS_FORMAT_INVALID) is False
@@ -83,26 +85,46 @@ class TestRoleBased:
 
 
 class TestVerifyEmail:
-    def test_no_api_key_returns_format_invalid(self):
-        result = asyncio.run(verify_email("test@example.com", ""))
+    def test_invalid_format(self):
+        result = asyncio.run(verify_email("not-an-email"))
         assert result.status == STATUS_FORMAT_INVALID
 
-    def test_invalid_format_returns_format_invalid(self):
-        result = asyncio.run(verify_email("not-an-email", "fake-key"))
-        assert result.status == STATUS_FORMAT_INVALID
-
-    def test_role_based_email_detected(self):
-        result = asyncio.run(verify_email("info@example.com", "fake-key"))
+    def test_role_based_email(self):
+        result = asyncio.run(verify_email("info@example.com"))
         assert result.status == STATUS_ROLE_BASED
         assert result.score == 0.3
+
+    def test_disposable_email(self):
+        result = asyncio.run(verify_email("test@mailinator.com"))
+        assert result.status == STATUS_DISPOSABLE
+        assert result.score == 0.1
+
+    def test_no_mx_record(self):
+        """A domain with no MX records should return NO_MX_RECORD."""
+        result = asyncio.run(verify_email("test@nonexistent-domain-xyz123.com"))
+        assert result.status == STATUS_NO_MX
+
+    def test_valid_gmail(self):
+        """Gmail has MX records and is not catch-all, so should be VERIFIED
+        (SMTP probe may reject the specific address but MX is found)."""
+        result = asyncio.run(verify_email("test@gmail.com"))
+        # Gmail is not catch-all and has MX records
+        assert result.mx_found is True
+        assert result.status in (STATUS_VERIFIED, STATUS_SMTP_REJECTED, STATUS_CATCH_ALL)
 
 
 class TestVerifyEmails:
     def test_empty_list(self):
-        results = asyncio.run(verify_emails([], "fake-key"))
+        results = asyncio.run(verify_emails([]))
         assert results == {}
 
-    def test_no_api_key(self):
-        results = asyncio.run(verify_emails(["a@b.com"], ""))
-        assert "a@b.com" in results
-        assert results["a@b.com"].status == STATUS_FORMAT_INVALID
+    def test_batch_mixed(self):
+        results = asyncio.run(verify_emails([
+            "info@example.com",  # role-based
+            "test@mailinator.com",  # disposable
+            "invalid",  # format invalid
+        ]))
+        assert len(results) == 3
+        assert results["info@example.com"].status == STATUS_ROLE_BASED
+        assert results["test@mailinator.com"].status == STATUS_DISPOSABLE
+        assert results["invalid"].status == STATUS_FORMAT_INVALID
