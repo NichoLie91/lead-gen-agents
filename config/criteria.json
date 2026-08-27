@@ -1,6 +1,7 @@
 {
   "verticals": [
-    "plumber", "hvac", "cleaning", "mechanic", "dental",
+    "plumber", "hvac", "cleaning", "mechanic",
+    "dental", "dental clinic", "dentist", "orthodontist", "oral surgeon",
     "roofer", "landscaper", "pest control", "electrician", "locksmith",
     "painter", "flooring", "pool service", "tree service", "appliance repair"
   ],

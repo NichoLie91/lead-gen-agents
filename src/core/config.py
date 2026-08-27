@@ -72,6 +72,11 @@ class Settings:
     # removed from the v3 catalog 2026-08; Tavily extract fetches lead websites
     # for email discovery). Optional — enrichment degrades gracefully without it.
     tavily_api_key: str = ""
+    # Hunter.io API key for email finding (Domain Search) and verification.
+    # Free tier: 25 searches + 50 verifications/month. When set, Hunter is
+    # used as the primary email finder (replaces Tavily web scraping for
+    # email discovery) and as the primary verifier (replaces SMTP probe).
+    hunter_api_key: str = ""
     gh_pat: str = ""
     google_sheet_id: str = ""
     admin_telegram_ids: list[int] = field(default_factory=list)
@@ -106,6 +111,7 @@ class Settings:
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
             zerobounce_api_key=env.get("ZEROBOUNCE_API_KEY", ""),
             tavily_api_key=env.get("TAVILY_API_KEY", ""),
+            hunter_api_key=env.get("HUNTER_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),
             telegram_alert_chat_id=env.get("TELEGRAM_ALERT_CHAT_ID", ""),

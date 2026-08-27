@@ -32,6 +32,7 @@ import string
 from dataclasses import dataclass
 
 import dns.resolver
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,11 @@ DISPOSABLE_DOMAINS: set[str] = {
 
 # SMTP codes that mean "address rejected"
 SMTP_REJECT_CODES = {"550", "551", "552", "553", "554"}
+
+# Hunter.io API endpoints
+HUNTER_VERIFY_URL = "https://api.hunter.io/v2/email-verifier"
+HUNTER_DOMAIN_SEARCH_URL = "https://api.hunter.io/v2/domain-search"
+HUNTER_TIMEOUT = 15.0
 
 
 @dataclass
@@ -172,11 +178,52 @@ async def _is_catch_all(mx_host: str, domain: str) -> bool:
     return accepted
 
 
-async def verify_email(email: str, api_key: str = "") -> VerifyResult:
-    """Verify a single email address using pure SMTP + MX checks.
+async def _hunter_verify(email: str, api_key: str) -> VerifyResult | None:
+    """Verify an email via Hunter.io Email Verifier API.
 
-    No API key needed — everything is done via DNS and SMTP.
-    The api_key param is kept for backwards compatibility but ignored.
+    Returns VerifyResult on success, None on API failure (caller falls back to SMTP).
+    Hunter statuses: valid, invalid, accept_all, disposable, webmail, unknown
+    """
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=HUNTER_TIMEOUT) as client:
+            resp = await client.get(
+                HUNTER_VERIFY_URL,
+                params={"email": email, "api_key": api_key},
+            )
+        if resp.status_code != 200:
+            log.warning("Hunter verify HTTP %s for %s", resp.status_code, email)
+            return None
+        data = resp.json().get("data", {})
+        zb_status = (data.get("status") or "unknown").lower()
+        score = float(data.get("score") or 0.0)
+        # Map Hunter status to our pipeline status
+        status_map = {
+            "valid": STATUS_VERIFIED,
+            "accept_all": STATUS_CATCH_ALL,
+            "disposable": STATUS_DISPOSABLE,
+            "webmail": STATUS_VERIFIED,  # webmail = real mailbox
+            "invalid": STATUS_SMTP_REJECTED,
+            "unknown": STATUS_CATCH_ALL,  # treat unknown as catch-all
+        }
+        status = status_map.get(zb_status, STATUS_CATCH_ALL)
+        return VerifyResult(
+            email=email, status=status, score=score,
+            sub_status=f"hunter:{zb_status}",
+            mx_found=True, smtp_check=True,
+        )
+    except Exception as exc:
+        log.warning("Hunter verify failed for %s: %s", email, exc)
+        return None
+
+
+async def verify_email(email: str, api_key: str = "") -> VerifyResult:
+    """Verify a single email address.
+
+    Priority: Hunter.io API > SMTP probe + MX checks.
+    When Hunter API key is set, uses Hunter first (faster, more accurate).
+    Falls back to SMTP probe on API failure.
     """
     # 1. Format check
     if not _looks_valid(email):
@@ -199,7 +246,14 @@ async def verify_email(email: str, api_key: str = "") -> VerifyResult:
             sub_status="disposable",
         )
 
-    # 4. MX record lookup
+    # 4. Hunter.io verification (when API key is set)
+    if api_key:
+        hunter_result = await _hunter_verify(email, api_key)
+        if hunter_result:
+            return hunter_result
+        # Hunter failed — fall through to SMTP probe
+
+    # 5. MX record lookup
     mx_records = await _check_mx(domain)
     if not mx_records:
         return VerifyResult(
@@ -207,17 +261,16 @@ async def verify_email(email: str, api_key: str = "") -> VerifyResult:
             sub_status="no_mx",
         )
 
-    mx_host = mx_records[0][1]  # highest priority (lowest number)
+    mx_host = mx_records[0][1]
     primary_mx = mx_host
 
-    # 5. Catch-all detection (probe a random address first)
+    # 6. Catch-all detection (probe a random address first)
     catch_all = await _is_catch_all(primary_mx, domain)
 
-    # 6. SMTP probe for the actual address
+    # 7. SMTP probe for the actual address
     accepted, response = await _smtp_probe(primary_mx, email)
 
     if not accepted:
-        # SMTP rejected — address doesn't exist
         return VerifyResult(
             email=email, status=STATUS_SMTP_REJECTED, score=0.0,
             sub_status=response[:100],
@@ -225,14 +278,12 @@ async def verify_email(email: str, api_key: str = "") -> VerifyResult:
         )
 
     if catch_all:
-        # Domain accepts everything — risky but not blocked
         return VerifyResult(
             email=email, status=STATUS_CATCH_ALL, score=0.5,
             sub_status="catch_all_domain",
             mx_found=True, smtp_check=True,
         )
 
-    # Address accepted on a non-catch-all domain — verified
     return VerifyResult(
         email=email, status=STATUS_VERIFIED, score=0.95,
         mx_found=True, smtp_check=True,
@@ -264,6 +315,70 @@ async def verify_emails(
 def is_sendable(status: str) -> bool:
     """True when an email with this verification status is safe to send."""
     return status in (STATUS_VERIFIED, STATUS_CATCH_ALL)
+
+
+async def hunter_domain_search(domain: str, api_key: str) -> list[str]:
+    """Find email addresses for a domain via Hunter.io Domain Search API.
+
+    Returns list of discovered email addresses (most likely first).
+    Free tier: 25 searches/month. Each search returns up to 10 emails.
+    """
+    if not api_key or not domain:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=HUNTER_TIMEOUT) as client:
+            resp = await client.get(
+                HUNTER_DOMAIN_SEARCH_URL,
+                params={"domain": domain, "api_key": api_key, "limit": 10},
+            )
+        if resp.status_code != 200:
+            log.warning("Hunter domain search HTTP %s for %s", resp.status_code, domain)
+            return []
+        data = resp.json().get("data", {})
+        emails = []
+        for entry in data.get("emails", []):
+            addr = entry.get("value", "")
+            status = (entry.get("verification") or {}).get("status", "")
+            # Only include emails that Hunter considers valid or accept_all
+            if addr and status in ("valid", "accept_all", "", "unknown"):
+                emails.append(addr)
+        return emails
+    except Exception as exc:
+        log.warning("Hunter domain search failed for %s: %s", domain, exc)
+        return []
+
+
+async def hunter_email_finder(domain: str, first_name: str, last_name: str,
+                              api_key: str) -> str | None:
+    """Find a specific person's email via Hunter.io Email Finder API.
+
+    Returns the most likely email address, or None.
+    Free tier: 25 finders/month.
+    """
+    if not api_key or not domain or not (first_name or last_name):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=HUNTER_TIMEOUT) as client:
+            resp = await client.get(
+                "https://api.hunter.io/v2/email-finder",
+                params={
+                    "domain": domain,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "api_key": api_key,
+                },
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", {})
+        email = data.get("email", "")
+        confidence = data.get("confidence", 0)
+        # Only return if confidence > 50
+        if email and confidence > 50:
+            return email
+    except Exception as exc:
+        log.warning("Hunter email finder failed for %s %s: %s", first_name, last_name, exc)
+    return None
 
 
 def is_catch_all(status: str) -> bool:

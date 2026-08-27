@@ -14,6 +14,7 @@ import re
 from src.agents.composio_agent import ComposioAgent, ComposioNotConfigured
 from src.core.config import Settings
 from src.email_verify import (
+    hunter_domain_search,
     is_sendable,
     verify_email,
 )
@@ -104,7 +105,7 @@ async def enrich_leads(
                 lead["email"] = None
                 lead["instagram"] = None
         else:
-            email = email or await _find_email(composio, lead, llm=llm, budget=budget)
+            email = email or await _find_email(composio, lead, llm=llm, budget=budget, settings=settings)
             lead["email"] = normalize_email(email)
             instagram = instagram or await _find_instagram(composio, lead, llm=llm, budget=budget)
             lead["instagram"] = normalize_instagram(instagram)
@@ -112,9 +113,10 @@ async def enrich_leads(
                 lead["_chatbot"] = await _has_chatbot(composio, lead["website"])
                 lead["_agency_built"] = await _has_agency_marker(composio, lead["website"])
 
-        # Verify email via ZeroBounce if key is set; otherwise format-check only.
-        if lead.get("email") and settings.zerobounce_api_key and not settings.dry_run:
-            vresult = await verify_email(lead["email"], settings.zerobounce_api_key)
+        # Verify email via Hunter.io (primary) or SMTP probe (fallback).
+        verify_key = settings.hunter_api_key or settings.zerobounce_api_key
+        if lead.get("email") and verify_key and not settings.dry_run:
+            vresult = await verify_email(lead["email"], verify_key)
             lead["email_status"] = vresult.status
             lead["email_score"] = vresult.score
             if not is_sendable(vresult.status):
@@ -167,13 +169,50 @@ async def _llm_extract(llm, text: str, want: str, budget: dict) -> str | None:
 
 
 async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
-                      budget: dict | None = None) -> str | None:
+                      budget: dict | None = None, settings: Settings | None = None) -> str | None:
+    """Find email for a lead using Hunter.io (primary) > Tavily web scraping (fallback).
+
+    Hunter.io Domain Search is the most reliable source for B2B emails.
+    Falls back to Tavily web scraping + Gemini extraction when Hunter misses.
+    """
+    name = lead.get("name") or ""
+    city = lead.get("city") or ""
+    website = lead.get("website") or ""
+    hunter_key = settings.hunter_api_key if settings else ""
+
+    # --- Strategy 1: Hunter.io Domain Search (primary, most reliable) ---
+    if hunter_key and website:
+        # Extract domain from website URL
+        from urllib.parse import urlparse
+        parsed = urlparse(website)
+        domain = parsed.netloc or parsed.path
+        domain = domain.replace("www.", "").strip("/")
+        if domain:
+            hunter_emails = await hunter_domain_search(domain, hunter_key)
+            if hunter_emails:
+                # Return the first valid email found
+                for addr in hunter_emails:
+                    normalized = normalize_email(addr)
+                    if normalized:
+                        log.info("Hunter found email for %s: %s", name, normalized)
+                        return normalized
+
+    # --- Strategy 2: Hunter.io Domain Search on business name domain ---
+    if hunter_key and not website:
+        # Try common domain patterns: businessname.com, businessnamedental.com
+        slug = re.sub(r"[^a-z0-9]", "", name.lower())[:20]
+        for suffix in [".com", "dental.com", "clinic.com"]:
+            candidate_domain = f"{slug}{suffix}"
+            hunter_emails = await hunter_domain_search(candidate_domain, hunter_key)
+            if hunter_emails:
+                for addr in hunter_emails:
+                    normalized = normalize_email(addr)
+                    if normalized:
+                        log.info("Hunter found email for %s via %s: %s", name, candidate_domain, normalized)
+                        return normalized
+
+    # --- Strategy 3: Tavily web scraping (fallback) ---
     try:
-        name = lead.get("name") or ""
-        city = lead.get("city") or ""
-        # Live-probed (2026-08): Tavily returns ZERO results for
-        # "...contact email" phrasing but solid hits for natural business
-        # queries. Search the business itself first, then with its vertical.
         snippets = []
         queries = [f"{name} {city}".strip()]
         if lead.get("vertical"):
@@ -181,7 +220,7 @@ async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
         for idx, query in enumerate(queries):
             results = await composio.search_web(query)
             if not results:
-                continue  # zero hits -> try the vertical-phrased query
+                continue
             for result in results:
                 snippet = result.get("snippet") or result.get("content") or ""
                 snippets.append(snippet)
@@ -189,20 +228,17 @@ async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
                 if emails:
                     return emails[0]
             if idx == 0:
-                # First query already surfaced the business; the website fetch
-                # below is the real email source, so save the second search.
                 break
-        # Fallback: fetch the business website, then its /contact page — the
-        # reliable email source (Tavily extract returns raw page text).
+        # Fallback: fetch the business website + /contact page
         html = ""
-        if lead.get("website"):
-            html = await composio.fetch_url(lead["website"]) or ""
+        if website:
+            html = await composio.fetch_url(website) or ""
             emails = extract_emails(html)
             if emails:
                 return emails[0]
             if len(html.strip()) < 200:
                 contact = await composio.fetch_url(
-                    f"{lead['website'].rstrip('/')}/contact"
+                    f"{website.rstrip('/')}/contact"
                 ) or ""
                 emails = extract_emails(contact)
                 if emails:
