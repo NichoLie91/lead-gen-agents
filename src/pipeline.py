@@ -361,6 +361,14 @@ class Pipeline:
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
                                                    "", "", "SKIP", "NEEDS_ENRICHMENT"))
                 continue
+            # Email verification check: skip sends for unverified / bounced emails.
+            if lead.get("email_sendable") is False:
+                skipped += 1
+                email_status = lead.get("email_status", "UNKNOWN")
+                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
+                                                   "", "", "SKIP",
+                                                   f"EMAIL_{email_status}: not sendable"))
+                continue
             subject, body = await self._draft_email(lead)
             if tier == "HOT-VERIFIED" and sent < cap:
                 outcome = "SENT (dry-run)" if self.settings.dry_run else "SENT"
@@ -511,6 +519,11 @@ class Pipeline:
             if self.settings.dry_run:
                 ok = True
             elif self.composio.connected and row.get("Email"):
+                # Email verification gate: skip follow-ups to unverified emails.
+                email_status = row.get("Email Status") or ""
+                if email_status and email_status not in ("VERIFIED", "CATCH_ALL", ""):
+                    log.info("Skipping follow-up to %s: email status %s", row["Email"], email_status)
+                    continue
                 resp = await self.composio.gmail_send_email(
                     to=row["Email"], subject=subject, body=body)
                 ok = resp.get("ok", False)

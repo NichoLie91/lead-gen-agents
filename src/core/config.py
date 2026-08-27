@@ -63,6 +63,11 @@ class Settings:
     gemini_model_fast: str = "gemini-flash-latest"  # quick judgment: Atlas/Scout/Enrichment/Followups/Inbound
     gemini_model_pro: str = "gemini-flash-latest"   # heavier writing: outreach drafts + Lead Agent brain
     composio_api_key: str = ""
+    # ZeroBounce email verification API key. When set, every email found during
+    # enrichment is verified before being marked VERIFIED. Catches bounces,
+    # catch-all domains, spam traps, and role-based addresses (info@, sales@).
+    # Free tier: 100 verifications/month. Optional — degrades to format-check only.
+    zerobounce_api_key: str = ""
     # Tavily key for direct web extract fallback (the Composio fetch tool was
     # removed from the v3 catalog 2026-08; Tavily extract fetches lead websites
     # for email discovery). Optional — enrichment degrades gracefully without it.
@@ -99,6 +104,7 @@ class Settings:
             gemini_model_fast=(env.get("GEMINI_MODEL_FAST") or "gemini-flash-latest"),
             gemini_model_pro=(env.get("GEMINI_MODEL_PRO") or "gemini-flash-latest"),
             composio_api_key=env.get("COMPOSIO_API_KEY", ""),
+            zerobounce_api_key=env.get("ZEROBOUNCE_API_KEY", ""),
             tavily_api_key=env.get("TAVILY_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),

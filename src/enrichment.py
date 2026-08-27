@@ -13,6 +13,10 @@ import re
 
 from src.agents.composio_agent import ComposioAgent, ComposioNotConfigured
 from src.core.config import Settings
+from src.email_verify import (
+    is_sendable,
+    verify_email,
+)
 
 log = logging.getLogger(__name__)
 
@@ -108,7 +112,23 @@ async def enrich_leads(
                 lead["_chatbot"] = await _has_chatbot(composio, lead["website"])
                 lead["_agency_built"] = await _has_agency_marker(composio, lead["website"])
 
-        lead["email_status"] = "VERIFIED" if lead.get("email") else "NEEDS_ENRICHMENT"
+        # Verify email via ZeroBounce if key is set; otherwise format-check only.
+        if lead.get("email") and settings.zerobounce_api_key and not settings.dry_run:
+            vresult = await verify_email(lead["email"], settings.zerobounce_api_key)
+            lead["email_status"] = vresult.status
+            lead["email_score"] = vresult.score
+            if not is_sendable(vresult.status):
+                log.info(
+                    "Email %s failed verification: %s (score %.1f) -- marking as %s",
+                    lead["email"], vresult.status, vresult.score, vresult.status,
+                )
+                # Keep the email for the sheet record but flag it as not sendable
+                lead["email_sendable"] = False
+            else:
+                lead["email_sendable"] = True
+        else:
+            lead["email_status"] = "VERIFIED" if lead.get("email") else "NEEDS_ENRICHMENT"
+            lead["email_sendable"] = bool(lead.get("email"))
         lead["ig_status"] = "VERIFIED" if lead.get("instagram") else "NEEDS_VERIFICATION"
         out.append(lead)
     return out
