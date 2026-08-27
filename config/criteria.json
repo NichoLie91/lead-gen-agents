@@ -1,16 +1,23 @@
 {
-  "verticals": ["plumber", "hvac", "cleaning", "mechanic", "dental"],
+  "verticals": [
+    "plumber", "hvac", "cleaning", "mechanic", "dental",
+    "roofer", "landscaper", "pest control", "electrician", "locksmith",
+    "painter", "flooring", "pool service", "tree service", "appliance repair"
+  ],
   "metros": [
     "Houston", "Tampa", "Phoenix", "Indianapolis", "Atlanta", "Charlotte",
-    "Orlando", "Denver", "San Antonio", "Las Vegas", "Nashville", "Memphis"
+    "Orlando", "Denver", "San Antonio", "Las Vegas", "Nashville", "Memphis",
+    "Dallas", "Miami", "Jacksonville", "Austin", "Fort Worth", "Columbus",
+    "Charlotte", "Indianapolis", "San Francisco", "Seattle", "Denver",
+    "Nashville", "Oklahoma City", "El Paso", "Boston", "Portland"
   ],
-  "rating_min": 4.4,
-  "reviews_min": 5,
-  "reviews_max": 2000,
-  "raw_pool_cap": 250,
-  "target_leads": 250,
+  "rating_min": 4.0,
+  "reviews_min": 3,
+  "reviews_max": 3000,
+  "raw_pool_cap": 500,
+  "target_leads": 500,
   "per_vertical_cap_pct": 40,
-  "judgment_leads": 15,
+  "judgment_leads": 20,
   "hot_threshold": 90,
   "warm_threshold": 70,
   "emails_per_run_max": 50,
