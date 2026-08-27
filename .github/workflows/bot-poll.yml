@@ -54,6 +54,8 @@ jobs:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
           TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
           POLL_MAX_WAIT_SEC: "120"   # < each run's poll window; keep-alive starts the next run ~2.5-3 min later, so 120s guarantees runs never overlap (one getUpdates consumer per token — overlap caused 409 conflicts)
           POLL_KEEPALIVE: "1"   # re-dispatch bot-poll after each run; GitHub throttles the cron
 
