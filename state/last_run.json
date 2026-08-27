@@ -1,12 +1,12 @@
 {
-  "run_id": "a468313f",
+  "run_id": "4048b9d8",
   "mode": "full",
-  "started_at": "2026-08-27T19:32:20.473370+00:00",
+  "started_at": "2026-08-27T19:45:14.561968+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "candidates": 6,
+    "candidates": 4,
     "with_email": 0,
-    "needs_enrichment": 6,
+    "needs_enrichment": 4,
     "tiers": {},
     "emails_sent": 0,
     "emails_bounced": 0,
@@ -24,5 +24,5 @@
     "sheet_tabs_written": 5,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-27T19:33:34.885973+00:00"
+  "finished_at": "2026-08-27T19:46:14.029231+00:00"
 }
