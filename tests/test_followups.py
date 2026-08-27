@@ -44,8 +44,16 @@ def test_is_due_stops_at_max_followups():
 
 
 def test_bodies_include_name():
+    # Day 3 bump (Hormozi style): includes name, timing-focused
     body = build_followup_body({"Name": "Acme Plumbing", "City": "Houston"}, 0)
     assert "Acme Plumbing" in body
-    assert "Houston" in body
+    # Day 7 new angle: includes city and vertical
+    body7 = build_followup_body({"Name": "Acme Plumbing", "City": "Houston", "Vertical": "plumbing"}, 1)
+    assert "Acme Plumbing" in body7
+    assert "Houston" in body7
+    # Day 14 break-up: includes name
+    body14 = build_followup_body({"Name": "Acme Plumbing", "City": "Houston"}, 2)
+    assert "Acme Plumbing" in body14
+    assert build_followup_body({}, 0)
     assert build_followup_body({}, 1)
     assert build_followup_body({}, 2)

@@ -1,7 +1,14 @@
-"""Follow-up cadence (Step 06) — Day 3 / 7 / 14 automation.
+"""Follow-up cadence — Hormozi $100M Leads 4-email sequence.
 
-Pure logic (no I/O) so it is unit-testable: interval math, due-date checks and
-template bodies. The pipeline stage sends the emails and updates the CRM.
+Sequence (from examples.md + 8 video deep-dive):
+  Day 3: Bump — low-friction "circling back" check-in
+  Day 7: New angle + value — give something useful, not a pitch
+  Day 14: Break-up — social pressure flips, highest response rate
+
+"The break-up email often outperforms the initial outreach for response rate,
+because the social pressure flips." — Hormozi examples.md
+
+Pure logic (no I/O) so it is unit-testable.
 """
 from __future__ import annotations
 
@@ -13,8 +20,8 @@ MAX_FOLLOWUPS = len(FOLLOWUP_INTERVALS_DAYS)
 
 FOLLOWUP_STEP_LABELS = {
     0: "Day 3: bump",
-    1: "Day 7: case study",
-    2: "Day 14: final ask",
+    1: "Day 7: new angle",
+    2: "Day 14: break-up",
 }
 
 # Statuses that are eligible for follow-ups (someone is listening).
@@ -46,29 +53,35 @@ def is_due(row: dict, today: date | None = None) -> bool:
 
 
 def build_followup_body(lead: dict, step_index: int) -> str:
-    """Template body for the given follow-up step (Gemini can polish it)."""
+    """Hormozi follow-up sequence: bump -> new angle -> break-up.
+
+    Day 3 (bump): Low-friction "circling back" — no pitch, just check if timing works.
+    Day 7 (new angle): Give value, not a pitch. Share something useful.
+    Day 14 (break-up): The most powerful email. Social pressure flips. "Closing my followups".
+    """
     name = lead.get("Name") or "the business"
     city = lead.get("City") or "your city"
-    if step_index == 0:  # Day 3 bump
+    vertical = lead.get("Vertical") or "service"
+    if step_index == 0:  # Day 3 bump — Hormozi: "Wanted to bump this in case it got buried"
         return (
-            f"Hi {name} team — circling back on my note from a few days ago. "
-            f"I help {city} service businesses automate the follow-up busywork "
-            f"that slips through the cracks. I don't know if the timing is "
-            f"right, but if a 15-minute call would help, I'll make it easy."
+            f"Hey {name}, wanted to bump this in case it got buried. "
+            f"Quick question — is the missed-call / after-hours follow-up "
+            f"something you're actively working on, or is it on the back burner? "
+            f"Either answer is fine."
         )
-    if step_index == 1:  # Day 7 case study
+    if step_index == 1:  # Day 7 new angle — Hormozi: "Different angle" + give value
         return (
-            f"Hi {name} — one example of what I mean. A {city} plumbing "
-            f"business cut missed-call losses by automating after-hours "
-            f"follow-up, and the first build paid for itself in the first "
-            f"month. I can send the numbers if useful.\n\n"
-            f"Still happy to compare notes this week."
+            f"Hey {name}, different angle. A {city} {vertical} business I work "
+            f"with was losing about $4k/month to missed after-hours calls. We "
+            f"automated the follow-up and they booked 11 extra jobs in the first "
+            f"month. Happy to share exactly how if that's useful. "
+            f"Worth a 15-minute call this week?"
         )
-    # Day 14 final ask
+    # Day 14 break-up — Hormozi: "Closing my followups" + social pressure flips
     return (
-        f"Hi {name} — last note from me. If the timing's off, no problem at "
-        f"all: I'll close the loop here. If you do want a second opinion on "
-        f"the missed-call problem, my calendar's open this week."
+        f"Hey {name}, I'm closing my followups on this thread — figured you're "
+        f"slammed and this isn't the right moment. If the missed-call problem "
+        f"becomes a priority down the road, I'm around. Best of luck either way."
     )
 
 
