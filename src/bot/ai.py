@@ -66,7 +66,14 @@ _SYSTEM_BRIEF = (
     "Outreach drafts). 'score this business: ABC Plumbing 4.8 stars 120 reviews"
     " in Houston' -> agent work (Scout scores it). 'draft an email for a "
     "dental clinic in Atlanta' -> agent work (Outreach drafts it). "
-    "'what leads do we have in Tampa?' -> agent work (read from sheets)."
+    "'what leads do we have in Tampa?' -> agent work (read from sheets).\n\n"
+    "FILTERING: You can filter leads by score, tier, city, or vertical. "
+    "Examples:\n"
+    "- 'find me 300 leads with 95+ score' -> filter: min_score=95, limit=300\n"
+    "- 'show me HOT leads in Dallas' -> filter: tier=HOT-VERIFIED, city=Dallas\n"
+    "- 'give me only plumber leads scored above 80' -> filter: min_score=80, vertical=plumber\n"
+    "- 'exclude leads below 70' -> filter: min_score=70\n"
+    "- 'find dental leads in Atlanta with 90+ score' -> filter: min_score=90, vertical=dental, city=Atlanta"
 )
 
 

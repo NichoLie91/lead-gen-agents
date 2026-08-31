@@ -312,6 +312,14 @@ class LeadAgent:
         """
         task_lower = task.lower()
 
+        # Check if this is a filtering/scoring request first (score filters
+        # take priority over generic discover).
+        has_score_filter = any(k in params for k in (
+            "min_score", "max_score", "tier", "limit"))
+        if has_score_filter or any(w in task_lower for w in (
+                "filter", "95+", "above", "below", "exclude", "only")):
+            return await self._task_filter_leads(params)
+
         # Route to the right agent based on the task description.
         if any(w in task_lower for w in ("find", "search", "discover", "maps")):
             return await self._task_discover(params)
@@ -331,6 +339,7 @@ class LeadAgent:
                 "• 'score ABC Plumbing 4.8 stars 120 reviews' — Scout scores it\n"
                 "• 'draft an email for a dental clinic in Atlanta' — Outreach drafts\n"
                 "• 'what leads do we have in Tampa?' — check the sheets\n"
+                "• 'find me 300 leads with 95+ score' — filter by score\n"
                 "• 'run the pipeline' — trigger a full pipeline run\n"
                 "• 'send approved emails' — flush pending drafts")
 
@@ -351,6 +360,117 @@ class LeadAgent:
         if extras:
             result += "\n\n" + " | ".join(extras)
         return result
+
+    async def _task_filter_leads(self, params: dict) -> str:
+        """Filter leads from the Score tab by score, tier, city, or vertical.
+
+        Gemini passes parameters like min_score=95, tier=HOT-VERIFIED,
+        city=Dallas, vertical=plumber, limit=300. We read the Score tab,
+        apply filters, and return the results.
+        """
+        min_score = int(params.get("min_score", 0) or 0)
+        max_score = int(params.get("max_score", 100) or 100)
+        tier_filter = params.get("tier", "")
+        city_filter = params.get("city", "")
+        vertical_filter = params.get("vertical", "")
+        limit = int(params.get("limit", 50) or 50)
+
+        try:
+            from src.agents.composio_agent import ComposioAgent
+            from src.agents.sheets_agent import SheetsAgent
+            sheets = SheetsAgent(ComposioAgent(self.settings), self.settings, self.state)
+
+            # Read the Score tab.
+            score_rows = await sheets.read_tab("Score")
+            if not score_rows or len(score_rows) < 2:
+                return "No scored leads yet. Run /run first to discover and score leads."
+
+            header = [str(h).strip() for h in score_rows[0]]
+            total_i = header.index("Total") if "Total" in header else None
+            tier_i = header.index("Tier") if "Tier" in header else None
+            name_i = header.index("Lead") if "Lead" in header else None
+
+            # Also read Pipeline tab for city/vertical info.
+            pipeline_rows = await sheets.read_tab("Pipeline")
+            pipeline_map: dict[str, dict] = {}
+            if pipeline_rows and len(pipeline_rows) > 1:
+                p_header = [str(h).strip() for h in pipeline_rows[0]]
+                p_name_i = p_header.index("Lead") if "Lead" in p_header else None
+                p_city_i = p_header.index("City-State") if "City-State" in p_header else None
+                p_cat_i = p_header.index("Category") if "Category" in p_header else None
+                for row in pipeline_rows[1:]:
+                    name = row[p_name_i] if (p_name_i is not None and p_name_i < len(row)) else ""
+                    if name:
+                        pipeline_map[str(name)] = {
+                            "city": str(row[p_city_i]) if (p_city_i is not None and p_city_i < len(row)) else "",
+                            "vertical": str(row[p_cat_i]) if (p_cat_i is not None and p_cat_i < len(row)) else "",
+                        }
+
+            # Apply filters.
+            filtered = []
+            for row in score_rows[1:]:
+                name = str(row[name_i]) if (name_i is not None and name_i < len(row)) else "?"
+                total = int(row[total_i]) if (total_i is not None and total_i < len(row) and str(row[total_i]).isdigit()) else 0
+                tier = str(row[tier_i]) if (tier_i is not None and tier_i < len(row)) else "?"
+
+                # Score filter.
+                if total < min_score:
+                    continue
+                if total > max_score:
+                    continue
+                # Tier filter.
+                if tier_filter and tier.upper() != tier_filter.upper():
+                    continue
+                # City filter.
+                info = pipeline_map.get(name, {})
+                if city_filter and city_filter.lower() not in info.get("city", "").lower():
+                    continue
+                # Vertical filter.
+                if vertical_filter and vertical_filter.lower() not in info.get("vertical", "").lower():
+                    continue
+                filtered.append({
+                    "name": name, "score": total, "tier": tier,
+                    "city": info.get("city", ""), "vertical": info.get("vertical", ""),
+                })
+
+            # Sort by score descending and apply limit.
+            filtered.sort(key=lambda x: x["score"], reverse=True)
+            total_found = len(filtered)
+            filtered = filtered[:limit]
+
+            if not filtered:
+                filters_desc = []
+                if min_score:
+                    filters_desc.append(f"score >= {min_score}")
+                if tier_filter:
+                    filters_desc.append(f"tier={tier_filter}")
+                if city_filter:
+                    filters_desc.append(f"city={city_filter}")
+                if vertical_filter:
+                    filters_desc.append(f"vertical={vertical_filter}")
+                return (f"No leads match your filters: {', '.join(filters_desc)}.\n"
+                        f"Total leads in Score tab: {len(score_rows) - 1}\n"
+                        "Try relaxing your filters or run /run to discover more leads.")
+
+            # Format results.
+            lines = [f"📊 Filtered leads ({total_found} total, showing top {len(filtered)}):\n"]
+            for i, lead in enumerate(filtered[:20], 1):
+                lines.append(
+                    f"{i}. {lead['name']} — score {lead['score']} [{lead['tier']}] "
+                    f"({lead['city']}, {lead['vertical']})")
+            if total_found > 20:
+                lines.append(f"\n... and {total_found - 20} more")
+            if tier_filter:
+                lines.append(f"\nFilter: tier={tier_filter}")
+            if min_score:
+                lines.append(f"Filter: score >= {min_score}")
+            lines.append("\nTo email these: /send all email")
+            lines.append("To draft emails: /run outreach-email")
+            return "\n".join(lines)
+
+        except Exception as exc:
+            log.warning("filter leads failed: %s", exc)
+            return f"Filter failed: {exc}. Try /status or /run first."
 
     async def _task_score(self, params: dict) -> str:
         """Score a specific business using Scout's rubric."""
