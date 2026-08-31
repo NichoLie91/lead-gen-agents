@@ -1,7 +1,7 @@
 {
-  "run_id": "caf34539",
+  "run_id": "805ff891",
   "mode": "inbound",
-  "started_at": "2026-08-30T20:51:20.135317+00:00",
+  "started_at": "2026-08-31T00:20:15.967492+00:00",
   "status": "COMPLETED",
   "metrics": {
     "inbound_scanned": 10,
@@ -11,5 +11,5 @@
     "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-08-30T20:51:31.658423+00:00"
+  "finished_at": "2026-08-31T00:20:25.284151+00:00"
 }
