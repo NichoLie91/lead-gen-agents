@@ -119,6 +119,13 @@ async def enrich_leads(
             vresult = await verify_email(lead["email"], verify_key)
             lead["email_status"] = vresult.status
             lead["email_score"] = vresult.score
+            # Track verification method for the sheet
+            if vresult.sub_status.startswith("hunter:") or (vresult.mx_found and vresult.smtp_check):
+                lead["email_verification_method"] = "public_source_plus_syntax_plus_MX"
+            elif vresult.mx_found:
+                lead["email_verification_method"] = "public_source_plus_syntax_only"
+            else:
+                lead["email_verification_method"] = "public_source_only"
             if not is_sendable(vresult.status):
                 log.info(
                     "Email %s failed verification: %s (score %.1f) -- marking as %s",
@@ -131,6 +138,7 @@ async def enrich_leads(
         else:
             lead["email_status"] = "VERIFIED" if lead.get("email") else "NEEDS_ENRICHMENT"
             lead["email_sendable"] = bool(lead.get("email"))
+            lead["email_verification_method"] = "not_found" if not lead.get("email") else "unverified"
         lead["ig_status"] = "VERIFIED" if lead.get("instagram") else "NEEDS_VERIFICATION"
         out.append(lead)
     return out

@@ -186,6 +186,12 @@ class MapsAgent:
                     "open_state": "Open",
                     "vertical": vertical,
                     "city": metro,
+                    "state": "TX",
+                    "source_url": f"https://maps.example/mock/{_slug(name)}",
+                    "source_evidence_text": f"Google Maps listing: {name} in {metro}",
+                    "evidence_quality": "high",
+                    "booking_signal": "unknown",
+                    "emergency_signal": "unknown",
                     "_mock": True, "_closed": False, "_chain": False, "_has_ig": has_ig,
                 })
 
@@ -197,6 +203,12 @@ class MapsAgent:
                     "phone": f"{_deterministic(metro, 200, 999)}-555-{_deterministic(metro, 1000, 9999)}",
                     "website": "", "rating": 4.8, "reviews": 250,
                     "open_state": "Open", "vertical": "dental", "city": metro,
+                    "state": "TX",
+                    "source_url": f"https://maps.example/mock/{_slug(_CHAIN_FAMILY)}",
+                    "source_evidence_text": f"Google Maps listing: {_CHAIN_FAMILY} in {metro}",
+                    "evidence_quality": "high",
+                    "booking_signal": "unknown",
+                    "emergency_signal": "unknown",
                     "_mock": True, "_closed": False, "_chain": False, "_has_ig": True,
                 })
 
@@ -209,8 +221,13 @@ class MapsAgent:
                     "address": f"{_deterministic(special['name'], 1, 9999)} Mock Rd, {metro}",
                     "phone": "" if special.get("no_contact") else f"{_deterministic(special['name'], 200, 999)}-555-1000",
                     "website": "", "rating": 4.5, "reviews": 60,
-                    "open_state": special["open_state"], "vertical": special["vertical"],
-                    "city": metro,
+                    "open_state": special["open_state"], "vertical": special["vertical"], "city": metro,
+                    "state": "TX",
+                    "source_url": f"https://maps.example/mock/{_slug(special['name'])}",
+                    "source_evidence_text": f"Google Maps listing: {special['name']} in {metro}",
+                    "evidence_quality": "medium",
+                    "booking_signal": "unknown",
+                    "emergency_signal": "unknown",
                     "_mock": True, "_closed": "closed" in special["open_state"].lower(),
                     "_chain": False, "_has_ig": False,
                 })

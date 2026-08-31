@@ -785,12 +785,29 @@ class Pipeline:
 
     async def _stage_pipeline(self, leads: list[dict], report: dict) -> None:
         rows = [
-            [i, lead.get("name"), lead.get("vertical"), lead.get("city"),
-             lead.get("phone", ""), lead.get("email", ""), lead.get("website", ""),
-             lead.get("website_status", ""), f"@{lead.get('instagram', '')}" if lead.get("instagram") else "",
-             lead.get("rating"), lead.get("reviews"), lead.get("email_status", ""),
-             lead["score"]["tier"], self._hook(lead), lead["score"]["total"],
-             "Discovery", "Enrich + outreach", ""]
+            [
+                i,  # rank
+                lead.get("name", ""),  # business_name
+                lead.get("email", "") or "",  # verified_email
+                lead.get("email_verification_method", "not_found"),  # email_verification_method
+                lead.get("city", ""),  # city
+                lead.get("state", ""),  # state
+                lead.get("vertical", ""),  # trade
+                lead.get("phone", ""),  # phone
+                lead.get("website", "") or "",  # official_site
+                lead.get("rating", "") or "",  # rating
+                lead.get("reviews", "") or "",  # review_count
+                f"https://www.instagram.com/{lead.get('instagram', '')}/" if lead.get("instagram") else "",  # instagram_profile
+                lead.get("booking_signal", "unknown"),  # booking_signal
+                lead.get("emergency_signal", "unknown"),  # emergency_signal
+                lead.get("source_url", ""),  # source_url
+                lead.get("source_evidence_text", ""),  # source_evidence_text
+                lead.get("evidence_quality", "medium"),  # evidence_quality
+                lead["score"]["total"],  # scout_score
+                lead["score"]["tier"],  # scout_tier
+                "email" if lead.get("email") and not str(lead.get("email", "")).endswith(".example") else "hold",  # recommended_channel
+                "email not publicly verified" if not lead.get("email") or str(lead.get("email", "")).endswith(".example") else "",  # hold_reason
+            ]
             for i, lead in enumerate(leads, start=1)
         ]
         followup = [

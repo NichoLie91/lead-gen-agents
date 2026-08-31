@@ -34,10 +34,14 @@ log = logging.getLogger(__name__)
 
 TABS = ("Pipeline", "Score", "Outreach", "Drafts", "Followup", "CRM")
 
+SCORING_SUMMARY_HEADER = ["Metric", "Value"]
+
 PIPELINE_HEADER = [
-    "#", "Lead", "Category", "City-State", "Phone", "Email", "Website",
-    "Website Status", "Instagram", "Google Rating", "# Reviews", "Status",
-    "Tier", "AI Bottleneck (Hook)", "Score", "Stage", "Next Step", "Value",
+    "rank", "business_name", "verified_email", "email_verification_method",
+    "city", "state", "trade", "phone", "official_site", "rating",
+    "review_count", "instagram_profile", "booking_signal", "emergency_signal",
+    "source_url", "source_evidence_text", "evidence_quality",
+    "scout_score", "scout_tier", "recommended_channel", "hold_reason",
 ]
 SCORE_HEADER = ["Lead", "ICP (0-25)", "Intent (0-25)", "Budget (0-20)",
                 "Reachability (0-15)", "Timing (0-15)", "Total", "Tier"]

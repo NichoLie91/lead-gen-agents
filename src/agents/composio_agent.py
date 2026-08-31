@@ -339,10 +339,22 @@ class ComposioAgent:
             if not isinstance(item, dict):
                 continue
             display = item.get("displayName") or {}
+            name = display.get("text") or item.get("title") or item.get("name", "")
+            address = (item.get("formattedAddress") or item.get("formatted_address")
+                       or item.get("address", ""))
+            # Parse state from address (e.g. "123 Main St, Toronto, ON, Canada" -> "ON")
+            state = ""
+            if address:
+                parts = [p.strip() for p in address.split(",")]
+                # Canadian provinces are 2-letter codes; US states too
+                for part in parts:
+                    part_upper = part.upper().strip()
+                    if len(part_upper) == 2 and part_upper.isalpha():
+                        state = part_upper
+                        break
             out.append({
-                "name": display.get("text") or item.get("title") or item.get("name", ""),
-                "address": item.get("formattedAddress") or item.get("formatted_address")
-                           or item.get("address", ""),
+                "name": name,
+                "address": address,
                 "phone": item.get("nationalPhoneNumber") or item.get("formatted_phone_number")
                          or item.get("phone", ""),
                 "website": item.get("websiteUri") or item.get("website") or item.get("website_url", ""),
@@ -351,6 +363,12 @@ class ComposioAgent:
                            or item.get("reviews"),
                 "open_state": item.get("businessStatus") or item.get("business_status")
                               or item.get("open_state", ""),
+                "state": state,
+                "source_url": item.get("googleMapsUri") or item.get("place_id") or "",
+                "source_evidence_text": f"Google Maps listing: {name} in {address[:80]}",
+                "evidence_quality": "high" if (item.get("rating") and item.get("userRatingCount")) else "medium",
+                "booking_signal": "unknown",
+                "emergency_signal": "unknown",
             })
         return out
 
