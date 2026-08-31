@@ -32,7 +32,7 @@ from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
 
-TABS = ("Pipeline", "Score", "Outreach", "Followup", "CRM")
+TABS = ("Pipeline", "Score", "Outreach", "Drafts", "Followup", "CRM")
 
 PIPELINE_HEADER = [
     "#", "Lead", "Category", "City-State", "Phone", "Email", "Website",
@@ -46,6 +46,10 @@ SCORE_HEADER = ["Lead", "ICP (0-25)", "Intent (0-25)", "Budget (0-20)",
 # in this private sheet.
 OUTREACH_HEADER = ["#", "Lead", "Lead ID", "Email", "Channel", "Subject",
                    "Body", "Status", "Send Date"]
+# Dedicated Drafts tab: holds WARM drafts awaiting approval before they
+# move to Outreach for sending. Separates "pending" from "sent/rejected".
+DRAFTS_HEADER = ["#", "Lead", "Lead ID", "Email", "Subject", "Body",
+                 "Score", "Tier", "Status", "Created", "Notes"]
 FOLLOWUP_HEADER = ["#", "Lead", "Step 1", "Step 2", "Step 3", "Step 4", "Status"]
 
 # Long-term lead memory (Step 06). Timeline holds a JSON array of
@@ -64,6 +68,7 @@ HEADERS = {
     "Pipeline": PIPELINE_HEADER,
     "Score": SCORE_HEADER,
     "Outreach": OUTREACH_HEADER,
+    "Drafts": DRAFTS_HEADER,
     "Followup": FOLLOWUP_HEADER,
     "CRM": CRM_HEADER,
 }

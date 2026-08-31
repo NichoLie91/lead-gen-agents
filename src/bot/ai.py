@@ -47,7 +47,10 @@ _ACTIONS_DESCRIPTION = (
     "/stop — halt the running pipeline\n"
     "/sheet — Google Sheet link\n"
     "/help — list all commands\n"
-    "/id — show your Telegram user ID"
+    "/id — show your Telegram user ID\n"
+    "/drafts — list all pending drafts in the Drafts tab\n"
+    "/approve draft <id> — approve a specific draft\n"
+    "/reject draft <id> — reject a specific draft"
 )
 
 _SYSTEM_BRIEF = (
@@ -56,7 +59,14 @@ _SYSTEM_BRIEF = (
     "score them (Scout: ICP/intent/budget/reachability/timing), enrich contact "
     "data, draft hyper-personalized outreach with Gemini, send approved "
     "emails/IG DMs, run follow-up cadences, handle inbound replies, and keep a "
-    "lead CRM in Google Sheets. The user talking to you is the owner."
+    "lead CRM in Google Sheets. The user talking to you is the owner.\n\n"
+    "You can ALSO perform custom agent work directly when the user asks for "
+    "something specific. For example: 'find me plumbing leads in Dallas' -> "
+    "agent work (Atlas searches, Scout scores, Enrichment finds contacts, "
+    "Outreach drafts). 'score this business: ABC Plumbing 4.8 stars 120 reviews"
+    " in Houston' -> agent work (Scout scores it). 'draft an email for a "
+    "dental clinic in Atlanta' -> agent work (Outreach drafts it). "
+    "'what leads do we have in Tampa?' -> agent work (read from sheets)."
 )
 
 
@@ -75,12 +85,20 @@ def build_intent_prompt(user_text: str, context: str = "") -> str:
         f"\"{user_text[:1000]}\"\n\n"
         "Decide their intent and reply with STRICT JSON ONLY (no markdown, no "
         "commentary, no code fences):\n"
-        '- To trigger an action: {"action": "command", "command": "/run", '
+        '- To trigger a command: {"action": "command", "command": "/run", '
         '"args": "full"}\n'
+        '- To do custom agent work (find leads, score a business, draft an email, '
+        '"check leads in a city, etc): {"action": "agent", "task": "<description>", '
+        '"params": {"vertical": "plumber", "city": "Dallas", ...}}\n'
         '- To answer conversationally: {"action": "reply", "text": "..."}\n\n'
         "Rules:\n"
         "- command MUST be one of the listed commands. Use args only for "
         "/approve, /reject (id or \"all\") and /run (a mode).\n"
+        "- Use action=agent when the user wants SPECIFIC work done that is NOT "
+        "just running the full pipeline. Examples: find leads in a specific city, "
+        "score a specific business, draft an email for a specific lead, check what "
+        "leads exist in the sheets, etc. The task field describes what to do; "
+        "params can include vertical, city, business_name, rating, reviews, etc.\n"
         "- For questions (what do the agents do, what happened last run, how "
         "does this work), reply briefly and only from the state given — never "
         "invent metrics.\n"
@@ -149,6 +167,19 @@ def parse_intent_response(raw: str) -> dict:
         return {"action": "command", "command": command, "args": args}
     if action == "reply":
         return {"action": "reply", "text": (str(data.get("text") or "").strip())[:4000]}
+    # NEW: agent work — Gemini decides which agents to invoke and with what
+    # parameters. The Lead Agent executes the actual work.
+    if action == "agent":
+        agent_task = str(data.get("task") or "").strip()
+        agent_params = data.get("params") or {}
+        if not agent_task:
+            return {}
+        return {
+            "action": "agent",
+            "task": agent_task[:500],
+            "params": {k: str(v)[:200] for k, v in agent_params.items()}
+                if isinstance(agent_params, dict) else {},
+        }
     return {}
 
 

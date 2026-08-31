@@ -148,7 +148,7 @@ class LeadAgent:
         if command == "/stop":
             self.github.set_stop()
             return "Stop flag set. The running pipeline will halt between stages."
-        if command == "/list drafts":
+        if command == "/list drafts" or command == "/drafts":
             return await self._list_drafts()
         if command == "/approve":
             return self._approve_drafts(args)
@@ -223,30 +223,55 @@ class LeadAgent:
         return "No drafts waiting for approval."
 
     async def _list_drafts(self) -> str:
+        """Show drafts from both the approval queue and the Drafts tab."""
         pending = self.approvals.pending()
-        if not pending:
-            return "No drafts waiting for approval. WARM leads become drafts after an outreach run."
-        names: dict[str, str] = {}
+        lines: list[str] = []
+
+        # Show from the Drafts sheet tab.
         try:
-            # Enrich with lead names from the private sheet (bot has Composio creds).
             from src.agents.composio_agent import ComposioAgent
             from src.agents.sheets_agent import SheetsAgent
 
             sheets = SheetsAgent(ComposioAgent(self.settings), self.settings, self.state)
-            raw = await sheets.read_tab("Outreach")
-            if raw and raw[0]:
+            raw = await sheets.read_tab("Drafts")
+            if raw and len(raw) > 1:
                 header = [str(h).strip() for h in raw[0]]
-                lid_i = header.index("Lead ID") if "Lead ID" in header else None
                 name_i = header.index("Lead") if "Lead" in header else None
+                email_i = header.index("Email") if "Email" in header else None
+                score_i = header.index("Score") if "Score" in header else None
+                tier_i = header.index("Tier") if "Tier" in header else None
+                status_i = header.index("Status") if "Status" in header else None
+                pending_rows = []
                 for row in raw[1:]:
-                    if lid_i is not None and lid_i < len(row):
-                        names[row[lid_i]] = row[name_i] if (name_i is not None and name_i < len(row)) else ""
+                    status = row[status_i] if (status_i is not None and status_i < len(row)) else ""
+                    if status in ("NEEDS_APPROVAL", "APPROVED"):
+                        pending_rows.append(row)
+                if pending_rows:
+                    lines.append(f"📋 Drafts tab — {len(pending_rows)} pending:")
+                    for row in pending_rows[:15]:
+                        name = row[name_i] if (name_i is not None and name_i < len(row)) else "?"
+                        email = row[email_i] if (email_i is not None and email_i < len(row)) else "?"
+                        score = row[score_i] if (score_i is not None and score_i < len(row)) else "?"
+                        tier = row[tier_i] if (tier_i is not None and tier_i < len(row)) else "?"
+                        lines.append(f"  • {name} ({email}) — score {score} {tier}")
+                else:
+                    lines.append("📋 Drafts tab: no pending drafts")
+            else:
+                lines.append("📋 Drafts tab: empty (run the pipeline to create drafts)")
         except Exception as exc:
             log.warning("list drafts sheet lookup failed: %s", exc)
-        lines = ["Drafts awaiting approval:"]
-        for lid in pending[:20]:
-            lines.append(f"• `{lid[:8]}`  {names.get(lid, '')}")
+
+        # Also show from the approval queue.
+        if pending:
+            if not lines:
+                lines.append("Drafts awaiting approval:")
+            for lid in pending[:10]:
+                lines.append(f"• `{lid[:8]}`")
+
+        if not lines:
+            return "No drafts waiting for approval. WARM leads become drafts after an outreach run."
         lines.append("\n/approve all — or /approve <id> · /reject <id> · /reject all")
+        lines.append("/send all email — send all approved drafts")
         return "\n".join(lines)
 
     # ---------- conversation entry point (owns EVERY reply) ----------
@@ -273,4 +298,139 @@ class LeadAgent:
                     "\"how did the last run go?\"")
         if intent.get("action") == "command":
             return await self.delegate(intent["command"], intent.get("args", ""), user_id)
+        if intent.get("action") == "agent":
+            return await self._execute_agent_task(
+                intent.get("task", ""), intent.get("params", {}))
         return intent.get("text") or "👍"
+
+    async def _execute_agent_task(self, task: str, params: dict) -> str:
+        """Execute a custom agent task that Gemini decided needs doing.
+
+        This is the bridge between Gemini's intent brain and the six-agent
+        team. Gemini describes what needs to happen; we route it to the
+        right agent(s) and return the result.
+        """
+        task_lower = task.lower()
+
+        # Route to the right agent based on the task description.
+        if any(w in task_lower for w in ("find", "search", "discover", "maps")):
+            return await self._task_discover(params)
+        if any(w in task_lower for w in ("score", "rating", "rubric")):
+            return await self._task_score(params)
+        if any(w in task_lower for w in ("draft", "email", "write", "outreach")):
+            return await self._task_draft(params)
+        if any(w in task_lower for w in ("check", "list", "show", "what leads")):
+            return await self._task_check(params)
+        if any(w in task_lower for w in ("send", "flush", "approved")):
+            return await self.github.trigger_pipeline("outreach-email")
+        if any(w in task_lower for w in ("status", "report", "how")):
+            return await self.delegate("/status", "", 0)
+        # Fallback: describe what we can do.
+        return ("I can help with that. Try these:\n"
+                "• 'find plumber leads in Dallas' — Atlas searches Google Maps\n"
+                "• 'score ABC Plumbing 4.8 stars 120 reviews' — Scout scores it\n"
+                "• 'draft an email for a dental clinic in Atlanta' — Outreach drafts\n"
+                "• 'what leads do we have in Tampa?' — check the sheets\n"
+                "• 'run the pipeline' — trigger a full pipeline run\n"
+                "• 'send approved emails' — flush pending drafts")
+
+    async def _task_discover(self, params: dict) -> str:
+        """Run Atlas to find leads matching the user's criteria."""
+        vertical = params.get("vertical", "")
+        city = params.get("city", "")
+        if not vertical and not city:
+            return "I need at least a vertical (plumber, hvac, etc) or a city. Example: 'find plumber leads in Dallas'"
+        # Trigger a targeted pipeline run and report the result.
+        mode = "discovery"
+        result = await self.github.trigger_pipeline(mode)
+        extras = []
+        if vertical:
+            extras.append(f"Vertical: {vertical}")
+        if city:
+            extras.append(f"City: {city}")
+        if extras:
+            result += "\n\n" + " | ".join(extras)
+        return result
+
+    async def _task_score(self, params: dict) -> str:
+        """Score a specific business using Scout's rubric."""
+        name = params.get("business_name", params.get("name", ""))
+        rating = params.get("rating", params.get("stars", ""))
+        reviews = params.get("reviews", params.get("review_count", ""))
+        city = params.get("city", "")
+        vertical = params.get("vertical", "")
+        if not name:
+            return "I need the business name. Example: 'score ABC Plumbing 4.8 stars 120 reviews in Dallas'"
+        # Build a synthetic lead for Scout to score.
+        from src.agents.scout import Scout
+        scout = Scout(self.settings, llm=self.llm)
+        lead = {
+            "name": name,
+            "city": city or "unknown",
+            "vertical": vertical or "service",
+            "rating": float(rating) if rating else 0,
+            "reviews": int(reviews) if reviews else 0,
+            "website": params.get("website", ""),
+            "email": params.get("email", ""),
+            "instagram": params.get("instagram", ""),
+        }
+        scored = scout.run([lead])
+        if not scored:
+            return "Scoring failed. Check the business details."
+        s = scored[0]["score"]
+        return (
+            f"📊 Score for {name}:\n"
+            f"ICP: {s['icp']}/25 | Intent: {s['intent']}/25 | "
+            f"Budget: {s['budget']}/20 | Reachability: {s['reachability']}/15 | "
+            f"Timing: {s['timing']}/15\n"
+            f"Total: {s['total']}/100 → {s['tier']}"
+        )
+
+    async def _task_draft(self, params: dict) -> str:
+        """Draft a personalized email for a specific business."""
+        name = params.get("business_name", params.get("name", ""))
+        if not name:
+            return "I need the business name. Example: 'draft an email for ABC Plumbing in Dallas'"
+        from src.pipeline import Pipeline
+        pipe = Pipeline(self.settings)
+        lead = {
+            "name": name,
+            "city": params.get("city", ""),
+            "vertical": params.get("vertical", "service"),
+            "rating": params.get("rating", "4"),
+            "reviews": params.get("reviews", "dozens of"),
+            "website": params.get("website", ""),
+            "website_status": params.get("website_status", ""),
+            "email": params.get("email", ""),
+            "instagram": params.get("instagram", ""),
+        }
+        subject, body = await pipe._draft_email(lead)
+        return (
+            f"📧 Draft for {name}:\n\n"
+            f"Subject: {subject}\n\n"
+            f"{body}\n\n"
+            f"Send with: /send all email (after approving)"
+        )
+
+    async def _task_check(self, params: dict) -> str:
+        """Check what leads exist in the sheets."""
+        city = params.get("city", "")
+        vertical = params.get("vertical", "")
+        report = self.state.load("last_run")
+        if not report:
+            return "No runs yet. Send /run to start the pipeline."
+        metrics = report.get("metrics", {})
+        tiers = metrics.get("tiers", {})
+        lines = [
+            f"Last run [{report.get('run_id', '?')}] — {report.get('status', '?')}",
+            f"Candidates: {metrics.get('candidates', 0)}",
+        ]
+        if tiers:
+            lines.append("Tiers: " + ", ".join(f"{k}={v}" for k, v in tiers.items()))
+        lines.append(f"Emails: sent={metrics.get('emails_sent', 0)} drafted={metrics.get('emails_drafted', 0)}")
+        if city:
+            lines.append(f"\n(City filter: {city} — run /run discovery to find more)")
+        if vertical:
+            lines.append(f"(Vertical filter: {vertical})")
+        lines.append(f"\nSheet: {self._sheet_url()}")
+        return "\n".join(lines)

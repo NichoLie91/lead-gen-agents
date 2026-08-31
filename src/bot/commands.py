@@ -7,6 +7,7 @@ COMMAND_HELP = {
     "/status": "Latest execution report & metrics (how the last run did)",
     "/run": "Trigger an immediate pipeline run: /run, or /run <mode> (full | discovery | enrichment | outreach-email | outreach-ig | followups | inbound | report)",
     "/list drafts": "List WARM drafts waiting for your approval",
+    "/drafts": "Show all drafts in the Drafts tab (pending + sent)",
     "/approve": "Approve drafts: /approve all, or /approve <id> from /list drafts",
     "/reject": "Reject drafts: /reject all, or /reject <id>",
     "/reject all": "Reject every draft currently waiting for approval",
@@ -56,6 +57,12 @@ def build_help() -> str:
     lines.append("💬 You can also just type what you want in plain English — "
                  "e.g. \"run the pipeline\", \"send the follow-ups\", "
                  "\"approve all drafts\", \"what happened last run?\".")
+    lines.append("")
+    lines.append("🔧 Custom requests Gemini can handle directly:")
+    lines.append("  · 'find plumber leads in Dallas' — Atlas searches Google Maps")
+    lines.append("  · 'score ABC Plumbing 4.8 stars 120 reviews' — Scout scores it")
+    lines.append("  · 'draft an email for a dental clinic in Atlanta' — Outreach drafts")
+    lines.append("  · 'what leads do we have in Tampa?' — check the sheets")
     return "\n".join(lines)
 
 

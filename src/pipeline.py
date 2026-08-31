@@ -60,12 +60,63 @@ STATUS_OBJECTION = "OBJECTION"
 STATUS_UNSUBSCRIBED = "UNSUBSCRIBED"
 
 # Vertical-specific AI-bottleneck hooks (spec 7.5 + outreach-templates.md).
+# Expanded to cover ALL ICP verticals — each hook is a specific, relatable
+# pain point that proves we understand their business (video framework:
+# signal-based personalization > generic pitch).
 HOOKS = {
+    # Core verticals
     "plumber": "after-hours drain and water-heater calls are landing in voicemail",
     "hvac": "peak-season calls don't stop at 5pm and are being missed",
     "cleaning": "review follow-up and quote chasing are eating the week",
     "mechanic": "missed calls and manual estimate follow-up are costing jobs",
     "dental": "recall reminders and new-patient follow-up are manual",
+    # Dental sub-verticals (all map to the dental hook)
+    "dental clinic": "recall reminders and new-patient follow-up are manual",
+    "dental implants": "consultation follow-up and case-acceptance calls are falling through",
+    "cosmetic dentistry": "high-value case follow-up is inconsistent after consultations",
+    "orthodontics": "retainer check reminders and new-patient consultations pile up",
+    "pediatric dentistry": "appointment reminders and new-family onboarding are manual",
+    "endodontics": "referral follow-up and post-op check-ins are time-consuming",
+    "periodontics": "treatment plan follow-up and maintenance recalls are manual",
+    "oral surgery": "pre-op instructions and post-surgery follow-ups are missed",
+    "prosthodontics": "case presentation follow-up and lab coordination calls are manual",
+    "family dentistry": "recare reminders and insurance verification calls pile up",
+    "emergency dental": "after-hours emergency calls are going to voicemail",
+    "teeth whitening": "consultation follow-up and seasonal promotions are manual",
+    "dental group": "multi-location call routing and patient recall are inconsistent",
+    # HVAC sub-verticals
+    "ac repair": "emergency AC calls in summer go to voicemail after hours",
+    "heating repair": "furnace breakdown calls in winter are being missed",
+    "air conditioning": "seasonal install quotes and follow-ups are manual",
+    # Plumbing sub-verticals
+    "drain cleaning": "emergency drain calls go to voicemail on weekends",
+    "water heater": "replacement quote follow-up is inconsistent",
+    "sewer repair": "inspection follow-up and estimate chasing are manual",
+    # Cleaning sub-verticals
+    "house cleaning": "recurring booking confirmations and quote follow-ups are manual",
+    "commercial cleaning": "bid follow-up and contract renewal reminders are inconsistent",
+    "carpet cleaning": "seasonal promotion follow-up and quote chasing are manual",
+    # Mechanic sub-verticals
+    "auto repair": "estimate follow-up and service reminders are inconsistent",
+    "auto body": "insurance claim follow-up and repair status updates are manual",
+    "oil change": "service reminders and upsell follow-ups are missed",
+    # Generic fallbacks
+    "contractor": "estimate follow-up and project scheduling calls are manual",
+    "roofing": "inspection follow-up and insurance claim calls are inconsistent",
+    "landscaping": "seasonal booking and quote follow-up are manual",
+    "pest control": "service reminders and re-treatment follow-ups are missed",
+    "locksmith": "after-hours emergency calls go to voicemail",
+    "electrician": "emergency calls and estimate follow-ups are inconsistent",
+    "handyman": "quote follow-up and scheduling calls pile up",
+    "moving": "estimate follow-up and booking confirmations are manual",
+    "storage": "unit availability calls and move-in follow-ups are missed",
+    "chiropractor": "patient recall and new-patient follow-up are manual",
+    "physical therapy": "discharge follow-up and exercise compliance checks are manual",
+    "vet": "pet owner recall and vaccination reminders are inconsistent",
+    "pet grooming": "appointment reminders and rebooking follow-ups are manual",
+    "tire shop": "seasonal tire change reminders and estimate follow-ups are missed",
+    "glass repair": "insurance claim follow-up and scheduling calls are manual",
+    "appliance repair": "service call follow-up and parts availability updates are manual",
 }
 
 # Human-writer rules from the ANCHOR job doc: banned punctuation + AI clichés.
@@ -157,6 +208,8 @@ class Pipeline:
         # Initialized here AND reset per-run in run() so stage-level tests (and
         # any direct stage call) have a working set.
         self._email_attempted: set[str] = set()
+        # Dedicated Drafts tab: WARM drafts accumulate here for visibility.
+        self._drafts_rows: list[list] = []
 
     # ---------- main entry ----------
     async def run(self, mode: str = "full") -> dict:
@@ -171,6 +224,7 @@ class Pipeline:
         # Leads an email was attempted for THIS run (sent/drafted/NEEDS_ENRICHMENT).
         # ANCHOR's IG rule: a DM is only eligible when an email attempt exists.
         self._email_attempted: set[str] = set()
+        self._drafts_rows: list[list] = []
 
         try:
             scored: list[dict] = []
@@ -206,6 +260,27 @@ class Pipeline:
             if mode == "inbound":
                 # AI employee loop: read + classify lead replies (Step 06).
                 await self._stage_inbound(report)
+
+            # Write the dedicated Drafts tab if any WARM drafts were created.
+            if self._drafts_rows:
+                # Merge with any existing drafts (carry forward pending ones).
+                existing_drafts = await self.sheets.read_tab("Drafts")
+                if existing_drafts and existing_drafts[0]:
+                    # Filter out drafts that were already sent (keep pending).
+                    prev_header = [str(h).strip() for h in existing_drafts[0]]
+                    try:
+                        prev_status_i = prev_header.index("Status")
+                    except ValueError:
+                        prev_status_i = None
+                    kept = []
+                    for row in existing_drafts[1:]:
+                        status = row[prev_status_i] if (prev_status_i is not None and prev_status_i < len(row)) else ""
+                        if status in ("NEEDS_APPROVAL", "APPROVED"):
+                            kept.append(row)
+                    merged = kept + self._drafts_rows
+                else:
+                    merged = self._drafts_rows
+                await self.sheets.write_tab("Drafts", merged)
 
             # Persist long-term lead memory (queued), then flush ALL tab writes
             # once at the end of the run (quota-safe: reads cached, writes
@@ -401,6 +476,12 @@ class Pipeline:
                 drafted += 1
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
                                                    subject, body, "NEEDS_APPROVAL", "Needs review (Warm)"))
+                # Also write to the dedicated Drafts tab for visibility.
+                self._drafts_rows.append([
+                    idx, name, lid, email, subject, body,
+                    lead["score"]["total"], tier, "NEEDS_APPROVAL",
+                    datetime.now(UTC).date().isoformat(), "Auto-approved WARM",
+                ])
             else:
                 skipped += 1
                 new_rows.append(self._outreach_row(idx, name, lid, email, "email",
@@ -777,23 +858,25 @@ class Pipeline:
         # Part 1: CONTEXT LINE (signal-based personalization)
         # Open with a specific trigger about THEIR business, not about you.
         # Signal: their Google profile data (rating, reviews, website status).
+        # Use the vertical-specific hook for maximum relevance.
+        hook = self._hook(lead)
         if not has_website:
             context = (
                 f"Your {rating} star profile in {city} with {reviews} reviews "
                 f"tells me you are booked enough to miss calls but have no "
-                f"online booking system."
+                f"online booking system. {hook.title() if hook else ''}."
             )
         else:
             context = (
                 f"Your {rating} star profile in {city} with {reviews} reviews "
-                f"tells me you likely deal with after-hours call overflow "
-                f"during peak season."
+                f"tells me you likely deal with {hook if hook else 'after-hours call overflow'}."
             )
 
         # Part 2: PROBLEM-SOLUTION (one sentence each, no features)
+        # Use the vertical-specific hook to make the problem feel real and local.
         problem = (
             f"Most {vertical} shops in {city} lose 2-3 jobs a week to voicemail "
-            f"after hours. That is real revenue walking to your competitor."
+            f"after hours. {hook.title() if hook else 'That is real revenue walking to your competitor.'}"
         )
         solution = (
             "I build AI follow-up systems that catch those missed calls and "
