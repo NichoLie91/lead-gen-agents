@@ -421,15 +421,15 @@ class Pipeline:
             # Every lead counts as an email attempt (sent / drafted / NEEDS
             # ENRICHMENT) for the IG eligibility rule (doc 4).
             self._email_attempted.add(lid)
-            # Skip re-drafting leads that already have an Outreach row or a
-            # CONTACTED/DRAFTED CRM status from a previous run.
-            crm_row = self.crm.find_by_lead_id(lid)
-            if lid in already_handled or (
-                    crm_row and crm_row.get("Status") in (STATUS_CONTACTED, STATUS_DRAFTED)):
+            # Skip re-drafting leads that already have an Outreach row
+            # (prevents the OA Plumbing 3x duplicate bug).
+            # NOTE: CRM status is NOT checked here — clearing the Outreach
+            # tab should allow re-drafting even if the CRM still says DRAFTED.
+            if lid in already_handled:
                 skipped += 1
                 new_rows.append(self._outreach_row(
                     idx, name, lid, email or "", "email", "", "", "SKIP",
-                    "Already drafted/contacted in a previous run"))
+                    "Already in Outreach tab from a previous run"))
                 continue
             if not email:
                 skipped += 1

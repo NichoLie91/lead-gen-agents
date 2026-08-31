@@ -52,8 +52,10 @@ def test_outreach_email_skips_lead_already_in_table(tmp_path):
     assert len(drafts) == 1, "same lead must only ever get one draft row"
 
 
-def test_outreach_email_skips_contacted_crm_lead(tmp_path):
-    """A lead already CONTACTED in the CRM must not be drafted again."""
+def test_outreach_email_allows_redraft_after_outreach_cleared(tmp_path):
+    """After clearing the Outreach tab, a lead with CRM CONTACTED status
+    can be re-drafted. Only the Outreach tab guards against duplicates
+    (the CRM guard was removed so clearing Outreach allows fresh drafts)."""
     p = make(tmp_path)
     asyncio.run(p.sheets.ensure_sheet())
     asyncio.run(p.crm.load())
@@ -65,8 +67,9 @@ def test_outreach_email_skips_contacted_crm_lead(tmp_path):
 
     report = {"metrics": {}}
     asyncio.run(p._stage_outreach_email([lead], report))
-    assert report["metrics"]["emails_drafted"] == 0
-    assert report["metrics"]["emails_skipped"] == 1
+    # Should be drafted (not skipped) since Outreach tab is empty.
+    assert report["metrics"]["emails_drafted"] == 1
+    assert report["metrics"]["emails_skipped"] == 0
 
 
 def test_send_approved_sends_each_lid_once(tmp_path):
