@@ -1,10 +1,10 @@
 {
   "key1": {
-    "failures": 79,
-    "cooldown_until": 1788153100.2195249
+    "failures": 19,
+    "cooldown_until": 1788211339.1331189
   },
   "key2": {
-    "failures": 126,
-    "cooldown_until": 1788153100.1786458
+    "failures": 19,
+    "cooldown_until": 1788211339.116104
   }
 }
