@@ -1,27 +1,35 @@
 {
   "verticals": [
-    "plumber", "hvac", "cleaning", "mechanic",
-    "dental", "dental clinic", "dentist", "orthodontist", "oral surgeon",
-    "roofer", "landscaper", "pest control", "electrician", "locksmith",
-    "painter", "flooring", "pool service", "tree service", "appliance repair"
+    "plumber", "hvac", "ac repair", "heating repair",
+    "cleaning", "house cleaning", "commercial cleaning",
+    "mechanic", "auto repair", "auto body",
+    "dental clinic", "dentist", "orthodontist", "cosmetic dentistry",
+    "pediatric dentistry", "dental implants",
+    "electrician", "locksmith", "roofer",
+    "pest control", "landscaper", "tree service",
+    "painter", "flooring", "pool service", "appliance repair",
+    "chiropractor", "physical therapy", "veterinarian",
+    "storage unit", "moving company"
   ],
   "metros": [
-    "Houston", "Tampa", "Phoenix", "Indianapolis", "Atlanta", "Charlotte",
-    "Orlando", "Denver", "San Antonio", "Las Vegas", "Nashville", "Memphis",
-    "Dallas", "Miami", "Jacksonville", "Austin", "Fort Worth", "Columbus",
-    "Charlotte", "Indianapolis", "San Francisco", "Seattle", "Denver",
-    "Nashville", "Oklahoma City", "El Paso", "Boston", "Portland"
+    "Houston", "Dallas", "Fort Worth", "San Antonio", "Austin",
+    "Tampa", "Orlando", "Jacksonville", "Miami",
+    "Phoenix", "Las Vegas",
+    "Atlanta", "Charlotte", "Nashville", "Memphis",
+    "Indianapolis", "Columbus", "Oklahoma City",
+    "Denver", "El Paso",
+    "San Francisco", "Seattle", "Portland", "Boston"
   ],
   "rating_min": 4.0,
   "reviews_min": 3,
   "reviews_max": 3000,
-  "raw_pool_cap": 500,
-  "target_leads": 500,
+  "raw_pool_cap": 800,
+  "target_leads": 800,
   "per_vertical_cap_pct": 40,
   "judgment_leads": 20,
   "hot_threshold": 90,
   "warm_threshold": 70,
   "emails_per_run_max": 50,
   "ig_dms_per_24h_max": 15,
-  "query_shape": "small {vertical} business {city} no website phone email"
+  "query_shape": "{vertical} in {city} website email phone"
 }
