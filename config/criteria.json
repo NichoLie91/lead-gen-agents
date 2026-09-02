@@ -31,5 +31,8 @@
   "warm_threshold": 70,
   "emails_per_run_max": 50,
   "ig_dms_per_24h_max": 15,
-  "query_shape": "{vertical} in {city} website email phone"
+  "query_shape": "{vertical} in {city} website email phone",
+  "sender": {
+    "physical_address": ""
+  }
 }

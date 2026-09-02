@@ -75,7 +75,7 @@ def build_followup_body(lead: dict, step_index: int) -> str:
             f"with was losing about $4k/month to missed after-hours calls. We "
             f"automated the follow-up and they booked 11 extra jobs in the first "
             f"month. Happy to share exactly how if that's useful. "
-            f"Worth a 15-minute call this week?"
+            f"Want the breakdown?"
         )
     # Day 14 break-up — Hormozi: "Closing my followups" + social pressure flips
     return (

@@ -36,6 +36,7 @@ from src.core.ident import lead_id
 from src.core.llm import GeminiPool, LLMUsage
 from src.core.logging import TelegramNotifier
 from src.core.state import StateStore
+from src.email_lint import append_footer, lint_email
 from src.enrichment import enrich_leads
 from src.followups import FOLLOWUP_INTERVALS_DAYS, build_followup_body, is_due, next_interval_days
 from src.inbound import classify_reply, parse_sender_email, suggested_reply
@@ -393,7 +394,7 @@ class Pipeline:
         """
         await self.crm.load()
         cap = min(int(self.settings.crit("emails_per_run_max", EMAIL_CAP_ABSOLUTE)), EMAIL_CAP_ABSOLUTE)
-        sent, drafted, skipped, bounced = 0, 0, 0, 0
+        sent, drafted, skipped, bounced, blocked = 0, 0, 0, 0, 0
         new_rows: list[list] = []
         # Leads already handled by a previous run must NEVER be drafted again:
         # an identical second NEEDS_APPROVAL row would otherwise accumulate in
@@ -449,7 +450,18 @@ class Pipeline:
                 outcome = "SENT (dry-run)" if self.settings.dry_run else "SENT"
                 note = "Hot - auto-sent"
                 if not self.settings.dry_run and self.composio.connected:
-                    resp = await self.composio.gmail_send_email(to=email, subject=subject, body=body)
+                    # Guardrail #0 (playbook §7): footer, then lint BEFORE any
+                    # Gmail call. A violation never sends; count as blocked.
+                    final = append_footer(body, name, self.settings.criteria)
+                    violations = lint_email(subject, final, self.settings.criteria)
+                    if violations:
+                        blocked += 1
+                        skipped += 1
+                        new_rows.append(self._outreach_row(
+                            idx, name, lid, email, "email", subject, final,
+                            "BLOCKED (lint)", "; ".join(violations)[:180]))
+                        continue
+                    resp = await self.composio.gmail_send_email(to=email, subject=subject, body=final)
                     if resp.get("ok"):
                         outcome = "SENT"
                     else:
@@ -495,6 +507,7 @@ class Pipeline:
         report["metrics"]["emails_bounced"] = bounced
         report["metrics"]["emails_drafted"] = drafted
         report["metrics"]["emails_skipped"] = skipped
+        report["metrics"]["emails_blocked_lint"] = blocked
 
     async def _stage_send_approved(self, report: dict) -> None:
         """Send WARM drafts the owner approved via Telegram (Step 04).
@@ -511,7 +524,7 @@ class Pipeline:
         col = {name: i for i, name in enumerate(header)}
         approved = self.approvals.approved()
         rejected = self.approvals.rejected()
-        sent = failed = rejected_count = 0
+        sent = failed = rejected_count = lint_blocked = 0
         # Send each approved lead AT MOST ONCE per pass. Accumulated duplicate
         # NEEDS_APPROVAL rows for the same lead (e.g. OA Plumbing: drafted 3
         # times before the draft guard existed) must not produce 3 emails —
@@ -541,8 +554,16 @@ class Pipeline:
             if email and self.settings.dry_run:
                 outcome = "SENT"                      # dry-run simulates the send
             elif email and self.composio.connected:
-                resp = await self.composio.gmail_send_email(to=email, subject=subject, body=body)
-                outcome = "SENT" if resp.get("ok") else f"FAILED: {resp.get('error', '')}"
+                # Guardrail #0 (playbook §7): footer, then lint BEFORE any
+                # Gmail call. A violation never sends; count as blocked.
+                final = append_footer(body, "", self.settings.criteria)
+                violations = lint_email(subject, final, self.settings.criteria)
+                if violations:
+                    lint_blocked += 1
+                    outcome = "BLOCKED (lint)"
+                else:
+                    resp = await self.composio.gmail_send_email(to=email, subject=subject, body=final)
+                    outcome = "SENT" if resp.get("ok") else f"FAILED: {resp.get('error', '')}"
             elif email:
                 outcome = "FAILED: gmail not connected"
             if outcome == "SENT":
@@ -562,6 +583,7 @@ class Pipeline:
         report["metrics"]["emails_approved_sent"] = sent
         report["metrics"]["emails_approved_failed"] = failed
         report["metrics"]["emails_rejected"] = rejected_count
+        report["metrics"]["emails_blocked_lint"] = lint_blocked
 
     async def _stage_followups(self, report: dict) -> None:
         """AI employee loop: send due Day 3/7/14 follow-ups (Hormozi sequence).
@@ -605,8 +627,17 @@ class Pipeline:
                 if email_status and email_status not in ("VERIFIED", "CATCH_ALL", ""):
                     log.info("Skipping follow-up to %s: email status %s", row["Email"], email_status)
                     continue
+                # Guardrail #0 (playbook §7): footer, then lint BEFORE any
+                # Gmail call. A violation never sends; count as failed.
+                final = append_footer(body, name, self.settings.criteria)
+                violations = lint_email(subject, final, self.settings.criteria)
+                if violations:
+                    log.warning("Follow-up to %s blocked by email linter: %s",
+                                row["Email"], "; ".join(violations)[:180])
+                    failed += 1
+                    continue
                 resp = await self.composio.gmail_send_email(
-                    to=row["Email"], subject=subject, body=body)
+                    to=row["Email"], subject=subject, body=final)
                 ok = resp.get("ok", False)
             if ok:
                 self.crm.record_followup_sent(lid)
@@ -863,7 +894,6 @@ class Pipeline:
         - No links, no attachments, no urgency, no spam trigger words
         - CTA: yes/no question, lowest friction possible
         """
-        name = lead.get("name", "the business")
         subject = self._pick_subject(lead)
         facts = self._lead_facts(lead)
         city = lead.get("city", "your city")
@@ -872,52 +902,31 @@ class Pipeline:
         reviews = lead.get("reviews") or "dozens of"
         has_website = bool(lead.get("website"))
 
-        # Part 1: CONTEXT LINE (signal-based personalization)
-        # Open with a specific trigger about THEIR business, not about you.
-        # Signal: their Google profile data (rating, reviews, website status).
-        # Use the vertical-specific hook for maximum relevance.
+        # Part 1: CONTEXT (signal-based personalization, SMYKM — about THEM).
+        # Part 2-3: PROBLEM + PROOF. Part 4: single interest CTA question.
+        # Playbook hard limits: <= 90 words, 3-4 sentences, ONE "?", no I/we
+        # opener, no links (lint_email blocks violations before any send).
         hook = self._hook(lead)
-        if not has_website:
+        if has_website:
             context = (
                 f"Your {rating} star profile in {city} with {reviews} reviews "
-                f"tells me you are booked enough to miss calls but have no "
-                f"online booking system. {hook.title() if hook else ''}."
+                f"suggests {hook if hook else 'after-hours calls are going to voicemail'}."
             )
         else:
             context = (
                 f"Your {rating} star profile in {city} with {reviews} reviews "
-                f"tells me you likely deal with {hook if hook else 'after-hours call overflow'}."
+                f"and no online booking suggests calls are slipping after hours."
             )
-
-        # Part 2: PROBLEM-SOLUTION (one sentence each, no features)
-        # Use the vertical-specific hook to make the problem feel real and local.
-        problem = (
-            f"Most {vertical} shops in {city} lose 2-3 jobs a week to voicemail "
-            f"after hours. {hook.title() if hook else 'That is real revenue walking to your competitor.'}"
+        problem_proof = (
+            f"A {city} {vertical} shop fixed the same gap with an AI follow-up "
+            f"system and added 11 extra bookings in the first month, paying "
+            f"only from the jobs it booked."
         )
-        solution = (
-            "I build AI follow-up systems that catch those missed calls and "
-            "book the jobs before the next morning. Only charged if they pay "
-            "for themselves."
-        )
-
-        # Part 3: COST OF INACTION (optional, high-impact question)
-        cost = f"How many jobs has {name} lost to missed after-hours calls this month?"
-
-        # Part 4: SOCIAL PROOF (one result, specific, one sentence)
-        social_proof = (
-            f"A {vertical} shop in {city} added 11 extra bookings in their "
-            f"first month after fixing this."
-        )
-
-        # Part 5: SOFT CTA (yes/no, reply-first, not meeting-first)
-        cta = "Does this apply to your shop?"
+        cta = "Worth a look for your shop?"
 
         body = (
             f"{context}\n\n"
-            f"{problem} {solution}\n\n"
-            f"{cost}\n\n"
-            f"{social_proof}\n\n"
+            f"{problem_proof}\n\n"
             f"{cta}"
         )
         if self.llm.available:
