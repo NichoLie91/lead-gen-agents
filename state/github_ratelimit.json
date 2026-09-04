@@ -1,1 +1,1 @@
-{"version": 1, "updated_at": 1788432646.869788, "ceiling_per_hour": 4000, "bucket_tokens": 3994.4364, "last_refill_ts": 1788432646.8697834, "server": {"limit": null, "remaining": null, "reset": null, "seen": false}, "secondary": [[1788432646.4770198, 1], [1788432646.8697834, 5]]}
+{"version": 1, "updated_at": 1788507296.1316118, "ceiling_per_hour": 4000, "bucket_tokens": 3994.4689, "last_refill_ts": 1788507296.131607, "server": {"limit": null, "remaining": null, "reset": null, "seen": false}, "secondary": [[1788507295.7096071, 1], [1788507296.131607, 5]]}
