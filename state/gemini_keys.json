@@ -3,7 +3,6 @@
     "failures": 0
   },
   "key2": {
-    "failures": 3,
-    "cooldown_until": 1788461204.163609
+    "failures": 0
   }
 }
