@@ -1,31 +1,15 @@
 {
-  "run_id": "950f82cc",
-  "mode": "full",
-  "started_at": "2026-09-10T18:14:30.088997+00:00",
+  "run_id": "6322bbad",
+  "mode": "inbound",
+  "started_at": "2026-09-10T20:42:18.032091+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "candidates": 13,
-    "with_email": 0,
-    "needs_enrichment": 13,
-    "tiers": {
-      "WARM": 1
-    },
-    "emails_sent": 0,
-    "emails_bounced": 0,
-    "emails_drafted": 0,
-    "emails_skipped": 1,
-    "emails_blocked_lint": 7,
-    "emails_approved_sent": 0,
-    "emails_approved_failed": 7,
-    "emails_rejected": 0,
-    "ig_sent": 0,
-    "ig_skipped": 1,
-    "ig_failed": 0,
-    "ig_queued": 0,
-    "ig_skipped_no_email": 0,
-    "pipeline_rows": 1,
-    "sheet_tabs_written": 5,
+    "inbound_scanned": 10,
+    "inbound_processed": 0,
+    "inbound_owner_notified": 0,
+    "inbound_auto_replied": 0,
+    "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-09-10T18:20:41.382960+00:00"
+  "finished_at": "2026-09-10T20:42:33.090244+00:00"
 }
