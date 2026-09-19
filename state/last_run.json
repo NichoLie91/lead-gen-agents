@@ -1,7 +1,7 @@
 {
-  "run_id": "bd26db37",
+  "run_id": "bf4f9769",
   "mode": "inbound",
-  "started_at": "2026-09-18T20:43:37.288746+00:00",
+  "started_at": "2026-09-19T00:04:00.189720+00:00",
   "status": "COMPLETED",
   "metrics": {
     "inbound_scanned": 10,
@@ -11,5 +11,5 @@
     "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-09-18T20:43:47.676500+00:00"
+  "finished_at": "2026-09-19T00:04:12.049128+00:00"
 }
