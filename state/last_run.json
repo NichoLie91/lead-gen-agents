@@ -1,14 +1,15 @@
 {
-  "run_id": "64833833",
-  "mode": "followups",
-  "started_at": "2026-09-28T16:20:49.915532+00:00",
+  "run_id": "484f66bb",
+  "mode": "inbound",
+  "started_at": "2026-09-28T20:27:46.292273+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "followups_sent": 0,
-    "followups_due": 0,
-    "followups_failed": 0,
+    "inbound_scanned": 10,
+    "inbound_processed": 0,
+    "inbound_owner_notified": 0,
+    "inbound_auto_replied": 0,
     "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-09-28T16:21:00.579651+00:00"
+  "finished_at": "2026-09-28T20:28:04.044769+00:00"
 }
