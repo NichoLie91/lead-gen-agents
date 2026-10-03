@@ -1,7 +1,7 @@
 {
-  "run_id": "eeafb430",
+  "run_id": "36e069a5",
   "mode": "inbound",
-  "started_at": "2026-10-02T23:39:10.597645+00:00",
+  "started_at": "2026-10-03T04:50:26.784590+00:00",
   "status": "COMPLETED",
   "metrics": {
     "inbound_scanned": 10,
@@ -11,5 +11,5 @@
     "sheet_tabs_written": 1,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-02T23:39:25.223879+00:00"
+  "finished_at": "2026-10-03T04:50:37.268676+00:00"
 }
