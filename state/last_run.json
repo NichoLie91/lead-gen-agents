@@ -1,10 +1,15 @@
 {
-  "run_id": "38263d42",
-  "mode": "full",
-  "started_at": "2026-10-10T19:11:47.522029+00:00",
-  "status": "STOPPED",
+  "run_id": "a0ba429b",
+  "mode": "inbound",
+  "started_at": "2026-10-10T23:22:38.298697+00:00",
+  "status": "COMPLETED",
   "metrics": {
-    "candidates": 0
+    "inbound_scanned": 10,
+    "inbound_processed": 0,
+    "inbound_owner_notified": 0,
+    "inbound_auto_replied": 0,
+    "sheet_tabs_written": 1,
+    "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-10T19:16:36.181817+00:00"
+  "finished_at": "2026-10-10T23:22:47.375803+00:00"
 }
