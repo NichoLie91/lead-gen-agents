@@ -27,17 +27,33 @@ _VERTICAL_TITLES = {
 }
 
 
+def _vertical_index(vertical: str) -> int:
+    """Stable slot for any vertical. The 5 curated keys keep their original
+    indices (mock names stay identical); anything else added to criteria.json
+    (ac repair, orthodontist, ...) gets a deterministic slot from its
+    codepoints -- never randomized hashing, so names are stable across runs."""
+    keys = list(_VERTICAL_TITLES)
+    if vertical in keys:
+        return keys.index(vertical)
+    return len(keys) + (sum(ord(c) for c in vertical) % 32)
+
+
 def _business_name(metro_idx: int, vertical: str, taken: set[str]) -> str:
     title = _VERTICAL_TITLES.get(vertical, vertical.title())
-    base = (metro_idx * 7 + list(_VERTICAL_TITLES).index(vertical) * 3)
-    i = 0
-    while True:
-        prefix = _NAME_PREFIXES[(base + i) % len(_NAME_PREFIXES)]
+    base = (metro_idx * 7 + _vertical_index(vertical) * 3)
+    n = len(_NAME_PREFIXES)
+    # Bounded: try each of the 20 prefixes once, then fall back to a
+    # deterministic disambiguated name. The old `while True` hung forever when
+    # a config with many verticals sharing a title exhausted all 20 prefixes.
+    for i in range(n):
+        prefix = _NAME_PREFIXES[(base + i) % n]
         name = f"{prefix} {title}"
         if name not in taken:
             taken.add(name)
             return name
-        i += 1
+    name = f"{_NAME_PREFIXES[base % n]} {title} #{base}-{sum(map(ord, vertical))}"
+    taken.add(name)
+    return name
 
 # Special cases that exercise the exclusion filters (only injected once, so
 # they never trip the in-pool chain rule themselves).
@@ -65,17 +81,42 @@ def _slug(name: str) -> str:
 
 
 class MapsAgent:
-    def __init__(self, composio: ComposioAgent, settings: Settings, llm=None):
+    def __init__(self, composio: ComposioAgent, settings: Settings, llm=None,
+                 state=None):
         self._composio = composio
         self._settings = settings
         self._llm = llm  # Atlas's Gemini brain (optional; None -> template queries)
+        self._state = state  # StateStore for per-query yield feedback (optional)
 
-    async def _llm_query_shapes(self) -> list[str]:
+    def _yield_feedback(self) -> str:
+        """Yield feedback from previous runs ('' when state is unavailable)."""
+        if self._state is None:
+            return ""
+        try:
+            from src.query_feedback import build_yield_feedback
+
+            return build_yield_feedback(self._state)
+        except Exception:
+            return ""
+
+    def _record_yield(self, per_shape: dict[str, int]) -> None:
+        """Persist this run's per-shape candidate counts (best-effort)."""
+        if self._state is None or not per_shape:
+            return
+        try:
+            from src.query_feedback import record_query_yield
+
+            record_query_yield(self._state, per_shape)
+        except Exception as exc:
+            log.debug("query yield recording failed: %s", exc)
+
+    async def _llm_query_shapes(self, feedback: str = "") -> list[str]:
         """Ask Gemini for up to 2 extra query templates for this run.
 
         One call per run (bounded); returns templates with {vertical}/{city}
         placeholders. Empty on failure/offline so discovery falls back to the
-        configured template.
+        configured template. When per-query yield feedback exists (Phase 3),
+        it is folded into the prompt so shapes regenerate from real data.
         """
         if not self._llm or not self._llm.available:
             return []
@@ -90,6 +131,8 @@ class MapsAgent:
             "a JSON array of strings, e.g. [\"{vertical} near {city} that miss "
             "calls\", ...]."
         )
+        if feedback:
+            prompt += f"\n\n{feedback}\nPrefer new shapes that could beat these averages."
         raw = await self._llm.complete(prompt)
         start, depth = raw.find("["), 0
         end = -1
@@ -134,27 +177,37 @@ class MapsAgent:
 
         pool: list[dict] = []
         queries = self.build_queries(verticals, metros)
+        base_shape = self._settings.crit(
+            "query_shape", "small {vertical} business {city} no website phone email")
         # Atlas's Gemini brain: fold in extra query shapes (bounded to the
         # first few pairs so we never explode the Maps call count). They are
         # INTERLEAVED right after the first base queries so they actually run
         # before the pool cap stops the loop (appending at the end would make
         # them dead code — the cap is hit long before positions 60+).
-        shapes = await self._llm_query_shapes()
+        # Phase 3: shapes regenerate against last runs' per-shape yield.
+        shapes = await self._llm_query_shapes(feedback=self._yield_feedback())
+        shape_by_query: dict[str, str] = {}
         if shapes:
             extra = []
             for _base, vertical, metro in queries[:3]:
                 for shape in shapes:
-                    extra.append((shape.format(vertical=vertical, city=metro),
-                                  vertical, metro))
+                    formatted = shape.format(vertical=vertical, city=metro)
+                    extra.append((formatted, vertical, metro))
+                    shape_by_query[formatted] = shape
             queries = queries[:3] + extra + queries[3:]
+        per_shape: dict[str, int] = {}
         for query, vertical, metro in queries:
             results = await self._composio.search_google_maps(query, start=0)
+            shape_key = shape_by_query.get(query, base_shape)
+            per_shape[shape_key] = per_shape.get(shape_key, 0) + len(results)
             for item in results:
                 item["vertical"] = vertical
                 item["city"] = metro
                 pool.append(item)
             if len(pool) >= cap:
                 break
+        # Phase 3: real yield data feeds next run's shape regeneration.
+        self._record_yield(per_shape)
         return pool[:cap]
 
     # ---------- offline mock ----------

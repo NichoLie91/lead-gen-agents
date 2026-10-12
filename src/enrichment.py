@@ -144,6 +144,45 @@ async def enrich_leads(
     return out
 
 
+async def _llm_decide_next(llm, context: str, tried: list[str],
+                           budget: dict, tool: str = "web search") -> str | None:
+    """One bounded agentic decision (Phase 3): given what was tried and what
+    came back, should we keep going, and with what query?
+
+    Returns the next query string, or None (stop). Costs one budget unit so a
+    lead can never loop on the LLM: decide (1) + extract (1) + cap 2 rounds
+    keeps the worst case near the same ~15 calls/run envelope as before.
+    """
+    if not llm or not getattr(llm, "available", False) or budget.get("left", 0) <= 0:
+        return None
+    budget["left"] -= 1
+    tried_lines = "\n".join(f"- {q}" for q in tried[-5:]) or "- (none)"
+    prompt = (
+        "You are the Enrichment agent finding contact info for a local "
+        "business. You may run ONE more " + tool + ".\n\n"
+        f"CONTEXT:\n{context[:800]}\n\n"
+        f"QUERIES ALREADY TRIED (do not repeat them):\n{tried_lines}\n\n"
+        "Decide: is one more query likely to find what regex missed? If NO, "
+        'reply {"next": null}. If YES, reply STRICT JSON only: '
+        '{"next": "<the exact query string>"}. Never invent contact data.'
+    )
+    import json
+
+    raw = await llm.complete(prompt)
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(raw[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    nxt = data.get("next")
+    if not isinstance(nxt, str) or not nxt.strip():
+        return None
+    query = " ".join(nxt.split())[:120]
+    return query or None
+
+
 async def _llm_extract(llm, text: str, want: str, budget: dict) -> str | None:
     """Gemini-powered extraction fallback for emails / Instagram handles.
 
@@ -251,11 +290,31 @@ async def _find_email(composio: ComposioAgent, lead: dict, llm=None,
                 emails = extract_emails(contact)
                 if emails:
                     return emails[0]
-        # Gemini brain: read the raw snippets/HTML when regex missed.
+        # Gemini brain (Phase 3 agentic loop): decide whether another query
+        # is worth it, run it, then read the raw text when regex missed.
         budget = budget or {"left": 15}
-        got = await _llm_extract(llm, " ".join(snippets) + " " + html, "email", budget)
+        all_text = " ".join(snippets) + " " + html
+        got = await _llm_extract(llm, all_text, "email", budget)
         if got:
             return normalize_email(got)
+        if budget.get("left", 0) > 0:
+            context = (
+                f"Business: {name}. City: {city}. Vertical: "
+                f"{lead.get('vertical', '')}. Website: {website or 'none'}. "
+                f"Text so far ({len(all_text)} chars) contained no valid email."
+            )
+            nxt = await _llm_decide_next(llm, context, queries, budget)
+            if nxt:
+                more = await composio.search_web(nxt)
+                for result in more:
+                    snippet = result.get("snippet") or result.get("content") or ""
+                    emails = extract_emails(snippet)
+                    if emails:
+                        return emails[0]
+                    snippets.append(snippet)
+                got = await _llm_extract(llm, " ".join(snippets), "email", budget)
+                if got:
+                    return normalize_email(got)
     except ComposioNotConfigured:
         pass
     return None
@@ -290,11 +349,32 @@ async def _find_instagram(composio: ComposioAgent, lead: dict, llm=None,
                 handle = normalize_instagram(token)
                 if handle:
                     return handle
-        # Gemini brain: read the raw snippets when regex missed.
+        # Gemini brain (Phase 3 agentic loop): extract, then decide whether
+        # one more query is worth it before giving up.
         budget = budget or {"left": 15}
         got = await _llm_extract(llm, " ".join(snippets), "instagram", budget)
         if got:
             return normalize_instagram(got)
+        if budget.get("left", 0) > 0:
+            context = (
+                f"Business: {lead.get('name', '')}. City: "
+                f"{lead.get('city', '')}. Looking for their Instagram handle; "
+                f"search snippets so far contained none."
+            )
+            nxt = await _llm_decide_next(llm, context, [query], budget)
+            if nxt:
+                more = await composio.search_web(nxt)
+                for result in more:
+                    snippet = result.get("snippet") or result.get("content") or ""
+                    for token in re.findall(r"@?instagram\.com/([A-Za-z0-9._]{1,30})", snippet):
+                        handle = normalize_instagram(token)
+                        if handle:
+                            return handle
+                got = await _llm_extract(llm, " ".join(
+                    r.get("snippet") or r.get("content") or "" for r in more),
+                    "instagram", budget)
+                if got:
+                    return normalize_instagram(got)
     except ComposioNotConfigured:
         pass
     return None

@@ -35,11 +35,14 @@ from src.core.config import Settings
 from src.core.ident import lead_id
 from src.core.llm import GeminiPool, LLMUsage
 from src.core.logging import TelegramNotifier
+from src.core.memory import memory_block, record_lesson
 from src.core.state import StateStore
+from src.draft_optimizer import draft_with_critique
 from src.email_lint import append_footer, lint_email
 from src.enrichment import enrich_leads
 from src.followups import FOLLOWUP_INTERVALS_DAYS, build_followup_body, is_due, next_interval_days
-from src.inbound import classify_reply, parse_sender_email, suggested_reply
+from src.inbound import parse_sender_email
+from src.inbound_triage import run_inbound_triage
 
 log = logging.getLogger(__name__)
 
@@ -199,8 +202,10 @@ class Pipeline:
         self.crm = CrmAgent(self.sheets)
         self.approvals = ApprovalQueue(self.state)
         # Every agent carries the shared Gemini brain (falls back to
-        # deterministic behavior when the key is absent).
-        self.maps = MapsAgent(self.composio, settings, llm=self.fast_llm)
+        # deterministic behavior when the key is absent). Maps gets the state
+        # store so per-query yield feedback compounds across runs (Phase 3).
+        self.maps = MapsAgent(self.composio, settings, llm=self.fast_llm,
+                              state=self.state)
         self.atlas = Atlas(self.maps, settings)
         self.scout = Scout(settings, llm=self.fast_llm)
         self.notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_alert_chat_id)
@@ -446,6 +451,15 @@ class Pipeline:
                                                    f"EMAIL_{email_status}: not sendable"))
                 continue
             subject, body = await self._draft_email(lead)
+            result = getattr(self, "_last_draft_result", None)
+            if result is not None:
+                self._note_draft_metrics(report, result)
+                if result.score <= 5:
+                    record_lesson(
+                        self.state, "Outreach",
+                        f"draft scored {result.score}/10 "
+                        f"({'; '.join(result.notes[:2]) or 'weak rubric match'})"
+                        " - template fallback used")
             if tier == "HOT-VERIFIED" and sent < cap:
                 outcome = "SENT (dry-run)" if self.settings.dry_run else "SENT"
                 note = "Hot - auto-sent"
@@ -584,6 +598,13 @@ class Pipeline:
         report["metrics"]["emails_approved_failed"] = failed
         report["metrics"]["emails_rejected"] = rejected_count
         report["metrics"]["emails_blocked_lint"] = lint_blocked
+        # Rejections are the strongest copy-quality signal we get: remember
+        # them so the next drafting pass tightens personalization.
+        if rejected_count:
+            record_lesson(
+                self.state, "Outreach",
+                f"owner rejected {rejected_count} draft(s) at send time - "
+                "tighten personalization and lead with the specific signal")
 
     async def _stage_followups(self, report: dict) -> None:
         """AI employee loop: send due Day 3/7/14 follow-ups (Hormozi sequence).
@@ -671,6 +692,10 @@ class Pipeline:
             self.composio.slug("mail_list_threads"), {"query": "newer_than:3d"})
         threads = (resp.get("data") or {}).get("threads", []) if resp.get("ok") else []
         processed = notified = auto_replied = 0
+        # Phase 3: one bounded LLM budget for the whole triage pass; the
+        # keyword classifier is the floor when it runs out.
+        triage_budget = {"left": 8}
+        history_used = 0
         for thread in threads[:25]:
             tid = (thread or {}).get("id", "")
             if not tid or tid in seen:
@@ -690,14 +715,14 @@ class Pipeline:
             if not lead:
                 continue  # not a tracked lead's reply
             lid = lead["Lead ID"]
-            llm_label = ""
-            if self.fast_llm.available:
-                llm_label = await self.fast_llm.complete(
-                    "Classify this lead's reply as exactly one of: INTERESTED, "
-                    "PRICE_OBJECTION, STOP, QUESTION. Reply with only the label.\n"
-                    f"Lead: {lead.get('Name')}\nReply: {text[:800]}"
-                )
-            kind = classify_reply(text, llm_label)
+            # Phase 3 triage loop: classify (LLM label + keyword floor) ->
+            # act -> escalate with CRM history. STOP stays code-enforced.
+            triage = await run_inbound_triage(
+                text=text, lead=lead, crm=self.crm,
+                llm=self.fast_llm, budget=triage_budget)
+            if triage.get("history_used"):
+                history_used += 1
+            kind = triage["kind"]
             self.crm.append_timeline(lid, "reply", f"[{kind}] {text[:300]}")
             self.crm.upsert(lid, name=lead.get("Name", ""))
             self.crm.set_status(lid, {
@@ -706,22 +731,22 @@ class Pipeline:
                 "STOP": STATUS_UNSUBSCRIBED,
                 "QUESTION": "QUESTION",
             }.get(kind, "QUESTION"))
-            if kind == "STOP":
+            if triage["action"] == "auto_reply":
                 if not self.settings.dry_run:
                     await self.composio.execute_action(
                         self.composio.slug("mail_reply_thread"),
                         {"thread_id": tid,
-                         "message_body": suggested_reply("STOP", lead),
+                         "message_body": triage["suggested"],
                          "recipient_email": sender})
                     auto_replied += 1
                 self.crm.append_timeline(lid, "auto-reply", "opt-out confirmed")
-            else:
+            elif triage.get("notify"):
                 title = {"INTERESTED": "🎯 Interested",
                          "PRICE_OBJECTION": "💰 Price objection",
                          "QUESTION": "❓ Question"}.get(kind, "ℹ️ Reply")
                 msg = (f"{title} — {lead.get('Name')}\n{lead.get('Email')}\n\n"
                        f"Reply: {text[:300]}\n\n"
-                       f"Suggested: {suggested_reply(kind, lead)}")
+                       f"Suggested: {triage['suggested']}")
                 if not self.settings.dry_run:
                     await self.notifier.notify(msg)
                     notified += 1
@@ -731,6 +756,7 @@ class Pipeline:
         report["metrics"]["inbound_processed"] = processed
         report["metrics"]["inbound_owner_notified"] = notified
         report["metrics"]["inbound_auto_replied"] = auto_replied
+        report["metrics"]["inbound_history_used"] = history_used
 
     async def _stage_outreach_ig(self, leads: list[dict], report: dict) -> None:
         cap = min(int(self.settings.crit("ig_dms_per_24h_max", IG_CAP_ABSOLUTE)), IG_CAP_ABSOLUTE)
@@ -931,7 +957,26 @@ class Pipeline:
         )
         if self.llm.available:
             body = await self._humanize(facts, body)
-        return subject, body
+        # Phase 2 evaluator-optimizer: the deterministic rubric critiques the
+        # draft, the model revises against the findings (max 3 iterations),
+        # and the best-scoring candidate wins. Without a key this is a no-op
+        # that returns the (already lint-compliant) template draft.
+        result = await draft_with_critique(
+            initial_subject=subject, initial_body=body, facts=facts,
+            rate_email=self.rate_email, llm=self.llm,
+            memory=memory_block(self.state, "Outreach"))
+        self._last_draft_result = result
+        return result.subject, result.body
+
+    @staticmethod
+    def _note_draft_metrics(report: dict, result) -> None:
+        """Fold one DraftResult into the run report (quality is a metric)."""
+        m = report.setdefault("metrics", {})
+        m["drafts_scored"] = m.get("drafts_scored", 0) + 1
+        m["draft_score_sum"] = m.get("draft_score_sum", 0) + result.score
+        m["draft_score_avg"] = round(m["draft_score_sum"] / m["drafts_scored"], 2)
+        m["draft_revision_steps"] = m.get("draft_revision_steps", 0) \
+            + max(0, result.iterations - 1)
 
     # ---------- ANCHOR human-writer rules (doc 4) ----------
     @staticmethod

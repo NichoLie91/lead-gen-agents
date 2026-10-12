@@ -33,6 +33,9 @@ jobs:
       - name: Unit tests
         run: pytest -q
 
+      - name: Behavioral evals (golden routing + scoring rationale)
+        run: python -m src.evals.run
+
       - name: PII-commit guard (spec 11)
         run: |
           # Fail if committed state files contain obvious PII (emails or

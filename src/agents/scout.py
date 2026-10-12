@@ -164,6 +164,97 @@ def score_lead(lead: dict, hot: int = 90, warm: int = 70,
     }
 
 
+def scoring_rationale(score: dict, lead: dict,
+                      metros: set[str] | None = None) -> str:
+    """Human-readable explanation of a score_lead result (Phase 2 evals +
+    owner-facing transparency). Pure function; never calls the LLM — the
+    rationale must match the deterministic rubric exactly."""
+    metros = metros or _DEFAULT_METROS
+    city = str(lead.get("city", "") or "").strip()
+    vertical = str(lead.get("vertical", "") or "").strip()
+    reviews = lead.get("reviews")
+    rating = lead.get("rating")
+    name = str(lead.get("name", "")).lower()
+
+    # ICP line: which of the 3 conditions fired.
+    in_metro = bool(city) and any(city.lower() == m.lower() for m in metros)
+    core = _trade_is_full(vertical)
+    in_range = _reviews_in_range(reviews)
+    met = sum(1 for c in (in_metro, core, in_range) if c)
+    if reviews is None:
+        reviews_part = "reviews missing (counts against ICP)"
+    else:
+        reviews_part = f"reviews {reviews} {'in' if in_range else 'NOT in'} range 5-2000"
+    lines = [
+        (
+            f"ICP {score['icp']}/25: {met}/3 conditions met "
+            f"(city {city or '(missing)'} {'in' if in_metro else 'NOT in'} metro set; "
+            f"trade {vertical or '(missing)'} {'core ICP' if core else 'not core ICP'}; "
+            f"{reviews_part})"
+        ),
+    ]
+
+    # Intent line: keyword / booking / IG contributions.
+    kw = next((k for k in INTENT_KEYWORDS if k in name), None)
+    website = str(lead.get("website") or "").strip()
+    status = str(lead.get("website_status") or "").lower()
+    intent_parts = [f"urgency keyword '{kw}' in name" if kw else "no urgency keyword"]
+    intent_parts.append("no online booking" if (not website or "no booking" in status)
+                        else "has online booking signal")
+    intent_parts.append("instagram present" if lead.get("instagram") else "no instagram")
+    lines.append(f"Intent {score['intent']}/25: " + ", ".join(intent_parts))
+
+    # Budget line: the reviews/rating proxy.
+    if score["budget"] >= 20:
+        budget_why = f"{rating} stars + {reviews} reviews"
+    elif score["budget"] >= 16:
+        budget_why = "moderate profile"
+    elif score["budget"] >= 12:
+        budget_why = "developing profile"
+    else:
+        budget_why = "weak reviews/rating profile"
+    lines.append(f"Budget {score['budget']}/20: {budget_why}")
+
+    # Reachability line: what contact surface exists and how confirmed.
+    email = lead.get("email")
+    email_status = str(lead.get("email_status") or "").upper()
+    has_ig = bool(lead.get("instagram"))
+    if email and email_status != "NEEDS_ENRICHMENT":
+        reach_why = "verified email + instagram" if has_ig else "verified email, no instagram"
+    elif email:
+        reach_why = "unverified email only" + (" + instagram" if has_ig else "")
+    elif has_ig:
+        reach_why = "no email, instagram only"
+    else:
+        reach_why = "no email, no instagram"
+    lines.append(f"Reachability {score['reachability']}/15: {reach_why}")
+
+    # Timing line: website/booking signal.
+    if not website:
+        timing_why = "no website at all"
+    elif "no booking" in status:
+        timing_why = "website without online booking"
+    elif "old" in status or "basic" in status:
+        timing_why = "outdated website"
+    elif "modern" in status or "automated" in status:
+        timing_why = "modern site with online booking"
+    else:
+        timing_why = "website of unknown age"
+    lines.append(f"Timing {score['timing']}/15: {timing_why}")
+
+    # Penalties + tier decision.
+    dq_names = [label for flag, label in (
+        (lead.get("_chatbot"), "chatbot"),
+        (lead.get("_agency_built"), "agency-built site"),
+        (lead.get("_chain"), "in-pool chain"),
+    ) if flag]
+    lines.append((f"Penalties -{score['penalties']}: " + " + ".join(dq_names))
+                 if dq_names else "Penalties 0: none")
+    lines.append(f"Tier {score['tier']}: total {score['total']} "
+                 "(HOT >= 90, WARM >= 70, NURTURE < 70)")
+    return "\n".join(lines)
+
+
 def pick_top(
     scored: list[dict],
     target: int,
