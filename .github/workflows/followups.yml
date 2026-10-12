@@ -1,12 +1,11 @@
 name: followups
 
 # AI employee loop: send due Day 3 / 7 / 14 follow-ups to contacted leads.
-# Runs daily at 08:00 UTC; shares the pipeline concurrency group so it never
-# collides with a pipeline/inbound run (they all write the same sheets).
+# Manual-only now (daily cron removed along with daily email outreach).
+# Shares the pipeline concurrency group so it never collides with a
+# pipeline/inbound run (they all write the same sheets).
 on:
-  schedule:
-    - cron: "0 8 * * *"
-  workflow_dispatch:           # manual run for debugging
+  workflow_dispatch:           # manual run via Actions UI or Telegram /run
 
 concurrency:
   group: pipeline

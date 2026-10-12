@@ -3,11 +3,11 @@ name: inbound
 # AI employee loop: scan email for lead replies, classify them (Gemini +
 # keyword fallback) and act — STOP gets an auto opt-out confirmation, and
 # INTERESTED / PRICE_OBJECTION / QUESTION get escalated to the owner on
-# Telegram with a suggested response. Runs every 2 hours.
+# Telegram with a suggested response.
+# Manual-only now (2-hourly cron removed — reply scanning requires owner
+# permission like everything else). Trigger via Actions UI or Telegram /inbound.
 on:
-  schedule:
-    - cron: "0 */2 * * *"
-  workflow_dispatch:           # manual scan for debugging
+  workflow_dispatch:
 
 concurrency:
   group: pipeline
