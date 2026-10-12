@@ -1,15 +1,15 @@
 {
-  "run_id": "69b61123",
-  "mode": "inbound",
-  "started_at": "2026-10-11T23:32:19.121216+00:00",
+  "run_id": "51f9c91a",
+  "mode": "discovery",
+  "started_at": "2026-10-12T22:27:01.087663+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "inbound_scanned": 10,
-    "inbound_processed": 0,
-    "inbound_owner_notified": 0,
-    "inbound_auto_replied": 0,
-    "sheet_tabs_written": 1,
+    "candidates": 0,
+    "with_email": 0,
+    "needs_enrichment": 0,
+    "tiers": {},
+    "sheet_tabs_written": 2,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-11T23:32:30.009822+00:00"
+  "finished_at": "2026-10-12T22:37:10.009520+00:00"
 }
