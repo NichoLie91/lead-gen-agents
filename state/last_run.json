@@ -1,7 +1,7 @@
 {
-  "run_id": "03c95071",
+  "run_id": "bf3710d2",
   "mode": "discovery",
-  "started_at": "2026-10-18T17:56:26.620243+00:00",
+  "started_at": "2026-10-19T20:29:01.313642+00:00",
   "status": "COMPLETED",
   "metrics": {
     "candidates": 0,
@@ -11,5 +11,5 @@
     "sheet_tabs_written": 2,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-18T17:59:37.838504+00:00"
+  "finished_at": "2026-10-19T20:32:37.657472+00:00"
 }
