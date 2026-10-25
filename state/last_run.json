@@ -1,15 +1,15 @@
 {
-  "run_id": "c0049206",
+  "run_id": "0df2a909",
   "mode": "purge",
-  "started_at": "2026-10-25T11:41:07.956264+00:00",
+  "started_at": "2026-10-25T11:49:57.253171+00:00",
   "status": "COMPLETED",
   "metrics": {
     "purge_drafts_removed": 0,
-    "purge_outreach_retired": 10,
-    "purge_approvals_cleared": 93,
+    "purge_outreach_retired": 0,
+    "purge_approvals_cleared": 0,
     "purge_leads_remembered": 260,
     "sheet_tabs_written": 3,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-25T11:41:31.069317+00:00"
+  "finished_at": "2026-10-25T11:50:20.715186+00:00"
 }
