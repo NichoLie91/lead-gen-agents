@@ -416,6 +416,16 @@ def test_eligible_needs_a_site_and_an_address():
     assert r.eligible({"website": "x.com", "email": ""}) is False
 
 
+def test_the_batch_state_is_committed_in_the_cloud():
+    """Every Actions job starts from a fresh checkout, so state that is not in
+    the GitHub agent's whitelist silently resets. Leaving research_batch out
+    meant the /next gate, the once-a-day guard and the done list were all lost,
+    and the same ten businesses would be drafted again on the next run."""
+    from src.agents.github_agent import STATE_FILES
+
+    assert r.STATE_FILE in STATE_FILES
+
+
 def test_classify_skip_defaults_to_unreachable():
     assert r.classify_skip("clean: no defect (/, /contact)") == r.SKIP_CLEAN
     assert r.classify_skip("nonsense") == r.SKIP_UNREACHABLE

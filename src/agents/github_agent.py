@@ -34,6 +34,11 @@ STATE_FILES = [
     "telegram_offset", "github_ratelimit", "stop_requested",
     "pipeline_running", "last_run", "dedupe", "sheet_mirror",
     "approvals", "inbound_seen", "llm_usage", "gemini_keys",
+    # The research batch's memory: which leads were drafted, the /next gate,
+    # retry dates and the once-a-day guard. Every Actions job starts from a
+    # fresh checkout, so leaving this out reset the batch on every run and the
+    # same ten businesses would be drafted again and again.
+    "research_batch",
 ]
 
 GITHUB_API = "https://api.github.com"

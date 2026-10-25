@@ -701,6 +701,10 @@ class Pipeline:
         if state.get("awaiting_confirm") and not force:
             metrics["research_awaiting_confirm"] = True
             metrics["research_batch"] = 0
+            # Logged as well as messaged: the Actions log is where "why did the
+            # batch do nothing?" gets answered.
+            log.info("research batch: waiting for /next after batch %s",
+                     state.get("batches", 0))
             await self._notify(
                 f"Batch {state.get('batches', 0)} is done and waiting. "
                 "Send /next for the next 10 businesses."
@@ -713,6 +717,7 @@ class Pipeline:
             # produced a second batch of ten the same day.
             metrics["research_batch"] = 0
             metrics["research_already_ran"] = True
+            log.info("research batch: one batch already ran today (%s)", today)
             await self._notify(
                 "A research batch already went out today. Reply /next only if "
                 "you want another ten now."
@@ -731,6 +736,8 @@ class Pipeline:
             # Nothing to inspect is a different message from "nothing found":
             # without a website and an email there is no detective work to do.
             metrics["research_batch"] = 0
+            log.info("research batch: %d leads, none has both a website and an "
+                     "email (%d incomplete)", len(leads), not_eligible)
             await self._notify(
                 f"No lead in the Pipeline tab has both a website and an email yet "
                 f"({len(leads)} leads, {not_eligible} missing one or the other), "
@@ -741,6 +748,9 @@ class Pipeline:
         batch = site_research.select_batch(pool, state, today=today)
         if not batch:
             metrics["research_batch"] = 0
+            log.info("research batch: %d eligible leads, all drafted already or "
+                     "waiting on a retry date (%d marked done)",
+                     len(pool), len(state.get("done") or []))
             await self._notify(
                 "Every lead in the Pipeline tab has either been written to "
                 "already or is waiting on a retry date, so there was nothing "
