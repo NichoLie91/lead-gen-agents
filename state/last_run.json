@@ -1,15 +1,15 @@
 {
-  "run_id": "7333c044",
-  "mode": "discovery",
-  "started_at": "2026-10-24T18:00:02.142192+00:00",
+  "run_id": "c0049206",
+  "mode": "purge",
+  "started_at": "2026-10-25T11:41:07.956264+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "candidates": 0,
-    "with_email": 0,
-    "needs_enrichment": 0,
-    "tiers": {},
-    "sheet_tabs_written": 2,
+    "purge_drafts_removed": 0,
+    "purge_outreach_retired": 10,
+    "purge_approvals_cleared": 93,
+    "purge_leads_remembered": 260,
+    "sheet_tabs_written": 3,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-10-24T18:04:49.120774+00:00"
+  "finished_at": "2026-10-25T11:41:31.069317+00:00"
 }
