@@ -36,8 +36,9 @@ GitHub Actions. Your job:
 4. **Keep the repo PII-safe** — the repo is PUBLIC. Lead names, emails, phones, and
    addresses live ONLY in the private Google Sheet. Anything you commit must be metadata,
    counts, or one-way sha256 hashes.
-5. **Human-in-the-loop** — outreach drafts never send without approval. You surface
-   decisions to the owner and wait.
+5. **Nothing sends, ever** — this system does not email or DM a lead. It writes drafts;
+   the owner sends them from his own mailbox. Any code path that used to send was
+   retired on 2026-10-25, so "send" is not an action you can perform.
 
 ---
 
@@ -45,9 +46,9 @@ GitHub Actions. Your job:
 
 - **What it does:** finds small local service businesses likely struggling with time/money
   waste (missed calls, manual follow-up, no online booking), scores them on a 0–100 rubric,
-  verifies their email/Instagram, drafts hyper-personalized outreach, sends after approval,
-  then runs a Day 3/7/14 follow-up cadence and reads inbound replies — a full AI-employee
-  loop with persistent CRM memory.
+  verifies their email/Instagram, and reads inbound replies. Outreach is a daily research
+  batch: open each business's own site, find one visible defect, write the email and a
+  day-4/day-10 closer, and hand it to the owner. Nothing is sent by the system.
 - **Verticals:** plumber, hvac, cleaning, mechanic, dental.
 - **Metros (12):** Houston, Tampa, Phoenix, Indianapolis, Atlanta, Charlotte, Orlando,
   Denver, San Antonio, Las Vegas, Nashville, Memphis.
@@ -76,7 +77,7 @@ GitHub Actions. Your job:
 | **Atlas** | Lead Discovery | Pulls a raw candidate pool from Google Maps for every (vertical × metro) pair, dedupes, applies exclusion filters, caps the pool at 250. Never contacts leads. |
 | **Scout** | Lead Scoring | Scores every lead 0–100 with a deterministic rubric (ICP/Intent/Budget/Reachability/Timing), applies −20 penalties per disqualifier, assigns tiers (HOT ≥90 / WARM ≥70 / NURTURE <70), picks the top N balanced ≤40% per vertical. Gemini adds a bounded −5..+5 judgment overlay and one-line rationales. |
 | **Enrichment** | Contact Research | Finds + verifies emails and Instagram handles via web search and website/contact-page fetches. Enforces hard validation rules; never invents contacts. |
-| **Outreach (Anchor)** | Emails + IG DMs | Drafts hyper-personalized, human-sounding copy. HOT-VERIFIED auto-sends; WARM drafts wait for approval. Sends IG DMs under strict Meta rules. The only agent that talks to the outside world. |
+| **Outreach (Anchor)** | Drafts only (sender retired) | Writes the copy; never sends it. The old per-lead template ("Saw you guys are running a solid 4.9 star setup…"), its self-approval, its Gmail send and its IG DMs were all retired on 2026-10-25. Copy now comes from the research batch: one defect actually seen on the business's own site, ten a day. |
 | **Followups** | Follow-up Cadence | Sends Day 3 / Day 7 / Day 14 follow-ups to contacted leads from the CRM; polishes copy with Gemini; marks exhausted leads LOST. |
 | **Inbound** | Inbound Replies | Scans email for lead replies, classifies them (INTERESTED / PRICE_OBJECTION / STOP / QUESTION), auto-confirms opt-outs, escalates everything else to the owner on Telegram with a suggested reply. |
 
@@ -145,13 +146,16 @@ English, Gemini's intent brain maps it to a whitelisted command or answers conve
 |---|---|---|
 | `/help` | List commands | — |
 | `/status` | Last-run report & metrics, tier breakdown, sends, sheet link | Atlas/Scout/Enrichment/Outreach |
-| `/run` or `/run <mode>` | Trigger `pipeline.yml` (mode: full/discovery/enrichment/outreach-email/outreach-ig/followups/inbound/report) | Atlas/Scout/Enrichment/Outreach |
+| `/run` or `/run <mode>` | Trigger `pipeline.yml` (mode: full/discovery/enrichment/batch/inbound/purge/report; outreach-email, outreach-ig and followups are retired and only explain themselves) | Atlas/Scout/Enrichment/Outreach |
 | `/list drafts` | List WARM drafts awaiting approval (by 8-char id) | Outreach |
-| `/approve` / `/approve <id>` / `/approve all` | Approve draft(s); sends on next `/send all email` | Outreach |
+| `/approve` / `/approve <id>` / `/approve all` | Mark draft(s) approved; nothing sends — send it yourself | Outreach |
 | `/reject <id>` / `/reject all` | Reject draft(s) | Outreach |
-| `/send all email` | Run `outreach-email` (HOT auto + approved WARM; 50/run cap) | Outreach |
-| `/send all instagram` | Run `outreach-ig` (15/24h cap + Meta rules) | Outreach |
-| `/followups` | Send due follow-ups now | Followups |
+| `/next` | Confirm the research batch and write the next 10 businesses | Outreach |
+| `/batch` | Research batch status: drafted, inspected, and why leads were skipped | Outreach |
+| `/purge` | One-time: delete the old templated draft pile and hand over to the batch flow | Outreach |
+| `/send all email` | RETIRED: explains that nothing sends | — |
+| `/send all instagram` | RETIRED: explains that nothing sends | — |
+| `/followups` | RETIRED as a sender: reports what is due, sends nothing | — |
 | `/inbound` | Scan email for replies now | Inbound |
 | `/stop` | Halt the running pipeline (flag checked between stages) | Outreach/Followups |
 | `/sheet` | Google Sheet link | Enrichment |
@@ -228,8 +232,9 @@ allow-list and never sharing the bot handle publicly).
 | Timing | 0–15 | no website 15; website without booking 12; outdated 10; modern/automated 6; unknown 8 |
 
 **Penalties:** −20 per disqualifier that slipped through Atlas (chatbot, agency-built,
-chain) — they stack. **Tiers:** HOT-VERIFIED ≥ 90 (auto-send), WARM 70–89 (draft +
-approval), NURTURE < 70 (discarded, never written to pipeline). Pick top N balanced ≤40%
+chain) — they stack. **Tiers:** HOT-VERIFIED ≥ 90, WARM 70–89, NURTURE < 70 (discarded,
+never written to pipeline). Tier no longer decides who gets emailed: the research batch
+picks the next ten businesses with a website and a verified email, and never sends. Pick top N balanced ≤40%
 per vertical. Gemini judgment may adjust totals by a bounded −5..+5 with a reason
 (guardrailed; rubric stays authoritative). No LLM required for the base score.
 
@@ -248,11 +253,12 @@ balanced three-part lists; overly symmetrical paragraphs; sterile or over-enthus
 attachments, no calendar links in the first email; mention business name, city, star rating,
 and one concrete observed bottleneck (from the per-lead facts — never invented).
 
-**Email decision tree per lead:**
-1. No confirmed email → nothing (no send, no draft); mark `NEEDS_ENRICHMENT`.
-2. HOT-VERIFIED (≥90) → send via Gmail; counts toward the 50/run cap.
-3. WARM (70–89) → save as a draft, status `Needs Review`; nothing sends without approval.
-4. Anything else was already discarded as NURTURE.
+**Today's decision tree per lead (research batch):**
+1. No website or no verified email → not eligible; nothing is written.
+2. Site unreadable, blocked, or clean → skipped, with the reason recorded and retried
+   at most twice. No email is invented.
+3. One defect actually seen → draft + day-4 + day-10 closer, in the Drafts tab and in
+   Telegram. Nothing sends, ever. Eligible once per business.
 
 **Hard caps (clamped in code; env cannot raise them):** max **50 emails/run**; failed
 sends/bounces recorded as `BOUNCED` in the sheet.

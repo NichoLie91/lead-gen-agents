@@ -1,8 +1,8 @@
 """Pipeline orchestrator (spec sections 4.2, 7, 10).
 
-Wires the 6 agents into a stage state machine:
+Wires the agents into a stage state machine:
 
-    discovery -> enrichment -> scoring -> outreach-email -> outreach-ig -> pipeline
+    discovery -> enrichment -> scoring -> pipeline (queue for the research batch)
 
 Enrichment runs BEFORE scoring so the Reachability category sees confirmed
 email/IG (the rubric grants 12 points for a confirmed email — user doc Agent 2).
@@ -20,26 +20,26 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
-from typing import ClassVar
+from datetime import UTC, datetime, timedelta
 
+from src import site_research
 from src.agents.atlas import Atlas
 from src.agents.composio_agent import ComposioAgent
 from src.agents.crm_agent import CrmAgent
 from src.agents.github_agent import GitHubAgent
 from src.agents.maps_agent import MapsAgent
 from src.agents.scout import Scout
-from src.agents.sheets_agent import SheetsAgent
+from src.agents.sheets_agent import DRAFTS_HEADER, PIPELINE_HEADER, SheetsAgent
 from src.approvals import ApprovalQueue
 from src.core.config import Settings
 from src.core.ident import lead_id
 from src.core.llm import GeminiPool, LLMUsage
 from src.core.logging import TelegramNotifier
 from src.core.state import StateStore
-from src.email_lint import append_footer, lint_email
 from src.enrichment import enrich_leads
-from src.followups import FOLLOWUP_INTERVALS_DAYS, build_followup_body, is_due, next_interval_days
+from src.followups import is_due
 from src.inbound import classify_reply, parse_sender_email, suggested_reply
+from src.sector_copy import draft as sector_copy_draft
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,51 @@ EMAIL_CAP_ABSOLUTE = 50
 IG_CAP_ABSOLUTE = 15
 
 MODES = ("full", "discovery", "enrichment", "outreach-email", "outreach-ig",
-         "followups", "inbound", "report")
+         "followups", "inbound", "report", "batch", "purge")
+
+# Drafts tab policy: a phone screenful of pending work, everything else moved to
+# DraftsArchive. Without this the queue grew by one row per draft forever and
+# nobody could tell which ten were today's.
+DRAFTS_MAX_ROWS = 20
+DRAFTS_STALE_DAYS = 21
+ARCHIVE_MAX_ROWS = 1000
+
+
+def _draft_created(row: list) -> str:
+    """The Created cell of a Drafts-tab row ('' when missing)."""
+    i = DRAFTS_HEADER.index("Created")
+    return str(row[i] or "").strip() if i < len(row) else ""
+
+
+def partition_drafts(rows: list[list], today: str, keep: int = DRAFTS_MAX_ROWS,
+                     stale_days: int = DRAFTS_STALE_DAYS) -> tuple[list[list], list[list]]:
+    """Split pending draft rows into (what the tab shows, what gets archived).
+
+    Newest first by Created. A row is archived when it is older than
+    ``stale_days`` or when ``keep`` newer rows push it out.
+    """
+    try:
+        cutoff = (datetime.fromisoformat(today)
+                  - timedelta(days=stale_days)).date().isoformat()
+    except ValueError:
+        cutoff = ""
+    ordered = sorted(rows, key=lambda r: _draft_created(r) or "0000", reverse=True)
+    kept: list[list] = []
+    archived: list[list] = []
+    for i, row in enumerate(ordered):
+        created = _draft_created(row)
+        if (cutoff and created and created < cutoff) or i >= keep:
+            archived.append(row)
+        else:
+            kept.append(row)
+    return kept, archived
+
+
+def partition_archive(history: list[list], fresh: list[list],
+                      cap: int = ARCHIVE_MAX_ROWS) -> list[list]:
+    """Append to the archive and drop the oldest rows past ``cap``."""
+    combined = list(history) + list(fresh)
+    return combined[-cap:] if len(combined) > cap else combined
 
 # Modes that run discovery -> enrichment -> scoring (lead generation path).
 DISCOVERY_MODES = ("full", "discovery", "enrichment", "outreach-email", "outreach-ig")
@@ -171,18 +215,6 @@ class StopRequested(Exception):
 
 
 class Pipeline:
-    # Cold-email skill: short, boring, internal-looking subject lines (2-4
-    # words), varied per lead so no two emails sound identical (spintax
-    # variation). Keyed by vertical; defaults to the generic pool.
-    SUBJECT_POOL: ClassVar[dict[str, tuple[str, ...]]] = {
-        "plumber": ("After-hours calls", "Missed calls", "Weekend calls", "Booking follow-up"),
-        "hvac": ("After-hours calls", "Peak-season calls", "Missed calls", "Booking follow-up"),
-        "cleaning": ("Quote follow-up", "Review replies", "New clients", "Booking follow-up"),
-        "mechanic": ("Missed calls", "Estimate follow-up", "Service reminders", "Booking follow-up"),
-        "dental": ("Recall reminders", "New-patient follow-up", "No-show follow-up", "Booking follow-up"),
-        "default": ("Missed calls", "Quick question", "Follow up", "After-hours calls"),
-    }
-
     def __init__(self, settings: Settings):
         self.settings = settings
         self.state = StateStore(settings.state_dir)
@@ -240,48 +272,41 @@ class Pipeline:
                 self._check_stop()
                 await self._stage_write_score_tab(scored)
 
-            if mode in ("full", "outreach-email"):
-                await self._stage_outreach_email(scored, report)
-                self._check_stop()
-                # Send drafts the owner approved via Telegram (Step 04).
-                await self._stage_send_approved(report)
-                self._check_stop()
-
-            if mode in ("full", "outreach-ig"):
-                await self._stage_outreach_ig(scored, report)
+            # SENDING IS RETIRED. `full` used to draft one templated email per
+            # scored lead, auto-approve every WARM one, and send it in the same
+            # run -- which is why the Drafts tab grew by the whole scored list
+            # every day with mail that had already gone out. The old modes stay
+            # routable so an existing trigger or bookmark gets an explanation
+            # instead of a send.
+            if mode in ("outreach-email", "outreach-ig", "followups"):
+                await self._stage_retired_senders(mode, report)
                 self._check_stop()
 
             if mode == "full":
                 await self._stage_pipeline(scored, report)
 
-            if mode == "followups":
-                # AI employee loop: Day 3/7/14 cadence on the CRM (Step 06).
-                await self._stage_followups(report)
+            if mode == "purge":
+                # One-time migration: drop the old draft pile, remember who the
+                # old flow already touched, and hand over to the batch flow.
+                await self._stage_purge_legacy(report)
+                self._check_stop()
+
+            if mode == "batch":
+                # Daily research batch: detective -> writer -> closer, 10 at a
+                # time, posted to Telegram and NOT sent. It reads the Pipeline
+                # tab and runs as its own scheduled job, so a broken discovery
+                # provider cannot silence the delivery.
+                await self._stage_research_batch(
+                    await self._load_pipeline_leads(), report)
+                self._check_stop()
 
             if mode == "inbound":
                 # AI employee loop: read + classify lead replies (Step 06).
                 await self._stage_inbound(report)
 
-            # Write the dedicated Drafts tab if any WARM drafts were created.
+            # Write the dedicated Drafts tab if any drafts were created.
             if self._drafts_rows:
-                # Merge with any existing drafts (carry forward pending ones).
-                existing_drafts = await self.sheets.read_tab("Drafts")
-                if existing_drafts and existing_drafts[0]:
-                    # Filter out drafts that were already sent (keep pending).
-                    prev_header = [str(h).strip() for h in existing_drafts[0]]
-                    try:
-                        prev_status_i = prev_header.index("Status")
-                    except ValueError:
-                        prev_status_i = None
-                    kept = []
-                    for row in existing_drafts[1:]:
-                        status = row[prev_status_i] if (prev_status_i is not None and prev_status_i < len(row)) else ""
-                        if status in ("NEEDS_APPROVAL", "APPROVED"):
-                            kept.append(row)
-                    merged = kept + self._drafts_rows
-                else:
-                    merged = self._drafts_rows
-                await self.sheets.write_tab("Drafts", merged)
+                await self._flush_drafts(report)
 
             # Persist long-term lead memory (queued), then flush ALL tab writes
             # once at the end of the run (quota-safe: reads cached, writes
@@ -317,9 +342,15 @@ class Pipeline:
     # ---------- stages ----------
     async def _stage_discovery(self, report: dict) -> list[dict]:
         raw = await self.atlas.run()
+        metrics = report.setdefault("metrics", {})
+        # Which Composio Maps action answered. Without this, a failover to a
+        # second provider was invisible and looked like the same broken source.
+        provider = self.atlas.provider_used()
+        if provider:
+            metrics["maps_provider"] = provider
         if not self.settings.dry_run:
             raw = self._filter_new_leads(raw)  # cross-run dedupe (spec 10)
-        report.setdefault("metrics", {})["candidates"] = len(raw)
+        metrics["candidates"] = len(raw)
         return raw
 
     def _filter_new_leads(self, raw: list[dict]) -> list[dict]:
@@ -386,273 +417,56 @@ class Pipeline:
         await self.sheets.write_tab("Score", rows)
 
     async def _stage_outreach_email(self, leads: list[dict], report: dict) -> None:
-        """Send HOT leads now; queue WARM leads as drafts awaiting approval.
+        """RETIRED. Templated cold email is no longer drafted, approved or sent.
 
-        Drafts are registered in the PII-safe approval queue (lead_id hashes)
-        and stored in the private Outreach sheet (status NEEDS_APPROVAL); the
-        owner approves them in Telegram and _stage_send_approved sends them.
+        What this stage did, and why it is gone: it wrote one templated email
+        per scored lead ("Saw you guys are running a solid 4.9 star setup in
+        Germantown..."), auto-approved every WARM draft it created, and then
+        _stage_send_approved sent it in the same run. HOT leads went out with no
+        approval at all. So every daily `full` run filled the Drafts tab and
+        emptied it into Gmail in one pass, and the tab only ever showed mail
+        that had already left.
+
+        Outreach is now the research batch (_stage_research_batch): ten
+        businesses a day, each email naming one defect seen on that business's
+        own site, and nothing is ever sent by this system. The method stays so
+        the `outreach-email` mode resolves to an explanation, not a send.
         """
-        await self.crm.load()
-        cap = min(int(self.settings.crit("emails_per_run_max", EMAIL_CAP_ABSOLUTE)), EMAIL_CAP_ABSOLUTE)
-        sent, drafted, skipped, bounced, blocked = 0, 0, 0, 0, 0
-        new_rows: list[list] = []
-        # Leads already handled by a previous run must NEVER be drafted again:
-        # an identical second NEEDS_APPROVAL row would otherwise accumulate in
-        # the table and, once approved, send a duplicate email (the OA Plumbing
-        # 3x bug — three accumulated drafts were all sent in one pass).
-        # Dedupe against the previous Outreach table (by Lead ID) AND the CRM
-        # status, so re-discovered leads can't queue a second draft.
-        already_handled: set[str] = set()
-        previous = await self.sheets.read_tab("Outreach")
-        if previous and previous[0]:
-            prev_header = [str(h).strip() for h in previous[0]]
-            try:
-                prev_lid_i = prev_header.index("Lead ID")
-            except ValueError:
-                prev_lid_i = None
-            if prev_lid_i is not None:
-                for row in previous[1:]:
-                    if prev_lid_i < len(row) and row[prev_lid_i]:
-                        already_handled.add(row[prev_lid_i])
-        for idx, lead in enumerate(leads, start=1):
-            lid = lead_id(lead.get("name", ""), lead.get("address", ""))
-            name = lead.get("name", "")
-            email = lead.get("email")
-            tier = lead["score"]["tier"]
-            # Every lead counts as an email attempt (sent / drafted / NEEDS
-            # ENRICHMENT) for the IG eligibility rule (doc 4).
-            self._email_attempted.add(lid)
-            # Skip re-drafting leads that already have an Outreach row
-            # (prevents the OA Plumbing 3x duplicate bug).
-            # NOTE: CRM status is NOT checked here — clearing the Outreach
-            # tab should allow re-drafting even if the CRM still says DRAFTED.
-            if lid in already_handled:
-                skipped += 1
-                new_rows.append(self._outreach_row(
-                    idx, name, lid, email or "", "email", "", "", "SKIP",
-                    "Already in Outreach tab from a previous run"))
-                continue
-            if not email:
-                skipped += 1
-                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   "", "", "SKIP", "NEEDS_ENRICHMENT"))
-                continue
-            # Email verification check: skip sends for unverified / bounced emails.
-            if lead.get("email_sendable") is False:
-                skipped += 1
-                email_status = lead.get("email_status", "UNKNOWN")
-                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   "", "", "SKIP",
-                                                   f"EMAIL_{email_status}: not sendable"))
-                continue
-            subject, body = await self._draft_email(lead)
-            if tier == "HOT-VERIFIED" and sent < cap:
-                outcome = "SENT (dry-run)" if self.settings.dry_run else "SENT"
-                note = "Hot - auto-sent"
-                if not self.settings.dry_run and self.composio.connected:
-                    # Guardrail #0 (playbook §7): footer, then lint BEFORE any
-                    # Gmail call. A violation never sends; count as blocked.
-                    final = append_footer(body, name, self.settings.criteria)
-                    violations = lint_email(subject, final, self.settings.criteria)
-                    if violations:
-                        blocked += 1
-                        skipped += 1
-                        new_rows.append(self._outreach_row(
-                            idx, name, lid, email, "email", subject, final,
-                            "BLOCKED (lint)", "; ".join(violations)[:180]))
-                        continue
-                    resp = await self.composio.gmail_send_email(to=email, subject=subject, body=final)
-                    if resp.get("ok"):
-                        outcome = "SENT"
-                    else:
-                        # Doc: failed sends are marked BOUNCED in the sheet.
-                        outcome = "BOUNCED"
-                        note = f"BOUNCED: {resp.get('error', '')[:150]}"
-                        bounced += 1
-                sent += 1
-                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   subject, body, outcome, note))
-                self.crm.upsert(lid, name=name, email=email,
-                                instagram=lead.get("instagram", ""), tier=tier)
-                self.crm.set_status(lid, STATUS_CONTACTED)
-                self.crm.set_last_contact(lid)
-                self.crm.schedule_followup(lid, FOLLOWUP_INTERVALS_DAYS[0])
-                self.crm.append_timeline(lid, "email-sent", subject)
-            elif tier == "WARM":
-                self.approvals.register(lid)
-                self.approvals.decide(lid, "approved")  # auto-approve WARM drafts
-                self.crm.upsert(lid, name=name, email=email,
-                                instagram=lead.get("instagram", ""), tier=tier,
-                                status=STATUS_DRAFTED)
-                self.crm.append_timeline(lid, "drafted", subject)
-                drafted += 1
-                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   subject, body, "NEEDS_APPROVAL", "Needs review (Warm)"))
-                # Also write to the dedicated Drafts tab for visibility.
-                self._drafts_rows.append([
-                    idx, name, lid, email, subject, body,
-                    lead["score"]["total"], tier, "NEEDS_APPROVAL",
-                    datetime.now(UTC).date().isoformat(), "Auto-approved WARM",
-                ])
-            else:
-                skipped += 1
-                new_rows.append(self._outreach_row(idx, name, lid, email, "email",
-                                                   "", "", "SKIP", tier))
-        # Carry forward the previous Outreach table so approved drafts and sent
-        # history survive between runs, then append this run's rows.
-        previous = await self.sheets.read_tab("Outreach")
-        merged = (previous[1:] if previous and previous[0] else []) + new_rows
-        await self.sheets.write_tab("Outreach", merged)
-        report["metrics"]["emails_sent"] = sent
-        report["metrics"]["emails_bounced"] = bounced
-        report["metrics"]["emails_drafted"] = drafted
-        report["metrics"]["emails_skipped"] = skipped
-        report["metrics"]["emails_blocked_lint"] = blocked
+        report.setdefault("metrics", {})["legacy_outreach_retired"] = True
+        log.warning(
+            "outreach-email is retired: %d lead(s) ignored, nothing drafted, "
+            "nothing sent. Use mode=batch for the research batch.",
+            len(leads),
+        )
 
     async def _stage_send_approved(self, report: dict) -> None:
-        """Send WARM drafts the owner approved via Telegram (Step 04).
+        """RETIRED. This system does not send email.
 
-        Reads the Outreach table (current-run queued rows or last flushed
-        table), sends rows whose lead_id is approved, marks rejections, and
-        requeues the table so nothing is lost.
+        This was the choke point: any Outreach row with status NEEDS_APPROVAL
+        whose lead hash sat in the approval queue went out through Gmail. The
+        old outreach stage approved its own drafts, so "needs your approval"
+        was already true by the time the owner read the message.
+
+        Drafts now live in the Drafts tab and in the Telegram batch, and the
+        owner sends them from his own mailbox.
         """
-        await self.crm.load()
-        raw = await self.sheets.read_tab("Outreach")
-        if not raw or len(raw) < 2:
-            return
-        header = [str(h).strip() for h in raw[0]]
-        col = {name: i for i, name in enumerate(header)}
-        approved = self.approvals.approved()
-        rejected = self.approvals.rejected()
-        sent = failed = rejected_count = lint_blocked = 0
-        # Send each approved lead AT MOST ONCE per pass. Accumulated duplicate
-        # NEEDS_APPROVAL rows for the same lead (e.g. OA Plumbing: drafted 3
-        # times before the draft guard existed) must not produce 3 emails —
-        # the first row sends, every later row for that lid is marked SKIP.
-        sent_lids: set[str] = set()
-        for row in raw[1:]:
-            lid = row[col["Lead ID"]] if col.get("Lead ID") is not None and col["Lead ID"] < len(row) else ""
-            status = row[col["Status"]] if col.get("Status") is not None and col["Status"] < len(row) else ""
-            if status != "NEEDS_APPROVAL" or not lid:
-                continue
-            if lid in rejected:
-                row[col["Status"]] = "REJECTED"
-                rejected_count += 1
-                continue
-            if lid not in approved:
-                continue
-            # Duplicate draft row for a lead already sent this pass (or already
-            # CONTACTED in the CRM): flip to SKIP so it never re-sends.
-            if lid in sent_lids or (
-                    (crm := self.crm.find_by_lead_id(lid)) and crm.get("Status") == STATUS_CONTACTED):
-                row[col["Status"]] = "SKIP"
-                continue
-            email = row[col["Email"]] if col.get("Email") is not None and col["Email"] < len(row) else ""
-            subject = row[col["Subject"]] if col.get("Subject") is not None and col["Subject"] < len(row) else ""
-            body = row[col["Body"]] if col.get("Body") is not None and col["Body"] < len(row) else ""
-            outcome = "FAILED: no email on draft"
-            if email and self.settings.dry_run:
-                outcome = "SENT"                      # dry-run simulates the send
-            elif email and self.composio.connected:
-                # Guardrail #0 (playbook §7): footer, then lint BEFORE any
-                # Gmail call. A violation never sends; count as blocked.
-                final = append_footer(body, "", self.settings.criteria)
-                violations = lint_email(subject, final, self.settings.criteria)
-                if violations:
-                    lint_blocked += 1
-                    outcome = "BLOCKED (lint)"
-                else:
-                    resp = await self.composio.gmail_send_email(to=email, subject=subject, body=final)
-                    outcome = "SENT" if resp.get("ok") else f"FAILED: {resp.get('error', '')}"
-            elif email:
-                outcome = "FAILED: gmail not connected"
-            if outcome == "SENT":
-                row[col["Status"]] = "SENT"
-                if col.get("Send Date") is not None and col["Send Date"] < len(row):
-                    row[col["Send Date"]] = datetime.now(UTC).date().isoformat()
-                sent += 1
-                sent_lids.add(lid)
-                self._email_attempted.add(lid)  # an approved send is an email attempt
-                self.crm.set_status(lid, STATUS_CONTACTED)
-                self.crm.set_last_contact(lid)
-                self.crm.schedule_followup(lid, FOLLOWUP_INTERVALS_DAYS[0])
-                self.crm.append_timeline(lid, "approved+sent", subject)
-            else:
-                failed += 1
-        await self.sheets.write_tab("Outreach", raw[1:])
-        report["metrics"]["emails_approved_sent"] = sent
-        report["metrics"]["emails_approved_failed"] = failed
-        report["metrics"]["emails_rejected"] = rejected_count
-        report["metrics"]["emails_blocked_lint"] = lint_blocked
+        report.setdefault("metrics", {})["legacy_sender_retired"] = True
 
     async def _stage_followups(self, report: dict) -> None:
-        """AI employee loop: send due Day 3/7/14 follow-ups (Hormozi sequence).
+        """RETIRED as a sender: counts what the CRM thinks is due, sends nothing.
 
-        Sequence from $100M Leads:
-          Day 3: bump — "circling back" low-friction check-in
-          Day 7: new angle — give value (case study / result), not a pitch
-          Day 14: break-up — social pressure flips, highest response rate
+        The Day 3/7/14 cadence was automated off the same templated first touch,
+        so with that flow gone there is no sequence left to continue. The
+        research batch hands over a written day-4 and day-10 closer per business
+        instead, for the owner to send himself.
         """
-        await self.crm.load()
+        metrics = report.setdefault("metrics", {})
         rows = await self.crm.load()
         due = [r for r in rows.values() if is_due(r, datetime.now(UTC).date())]
-        cap = min(int(self.settings.crit("emails_per_run_max", EMAIL_CAP_ABSOLUTE)), EMAIL_CAP_ABSOLUTE)
-        sent = failed = 0
-        for row in due:
-            if sent >= cap:
-                report["metrics"]["followups_capped"] = len(due) - sent
-                break
-            lid = row["Lead ID"]
-            name = row.get("Name") or "the business"
-            sent_n = int(row.get("Follow-ups Sent") or 0)
-            subject = f"Quick question for {name}"[:50]
-            body = build_followup_body(row, sent_n)
-            if self.fast_llm.available:
-                polished = await self.fast_llm.complete(
-                    "Rewrite this follow-up email to sound like a real human wrote it. "
-                    "Rules: no em-dashes, no AI cliches (delve, moreover, furthermore), "
-                    "under 900 chars, short sentences under 10 words. "
-                    "This is step " + str(sent_n + 1) + " of a 3-step follow-up sequence. "
-                    "Keep the same intent but make it sound natural and personal. "
-                    f"Original:\n\n{body}"
-                )
-                if polished:
-                    body = polished[:900]
-            ok = False
-            if self.settings.dry_run:
-                ok = True
-            elif self.composio.connected and row.get("Email"):
-                # Email verification gate: skip follow-ups to unverified emails.
-                email_status = row.get("Email Status") or ""
-                if email_status and email_status not in ("VERIFIED", "CATCH_ALL", ""):
-                    log.info("Skipping follow-up to %s: email status %s", row["Email"], email_status)
-                    continue
-                # Guardrail #0 (playbook §7): footer, then lint BEFORE any
-                # Gmail call. A violation never sends; count as failed.
-                final = append_footer(body, name, self.settings.criteria)
-                violations = lint_email(subject, final, self.settings.criteria)
-                if violations:
-                    log.warning("Follow-up to %s blocked by email linter: %s",
-                                row["Email"], "; ".join(violations)[:180])
-                    failed += 1
-                    continue
-                resp = await self.composio.gmail_send_email(
-                    to=row["Email"], subject=subject, body=final)
-                ok = resp.get("ok", False)
-            if ok:
-                self.crm.record_followup_sent(lid)
-                nxt = next_interval_days(sent_n + 1)
-                if nxt is not None:
-                    self.crm.schedule_followup(lid, nxt)
-                else:
-                    self.crm.set_status(lid, "LOST")  # cadence exhausted -> cold
-                self.crm.append_timeline(lid, "followup", f"step {sent_n + 1}/3: {subject}")
-                sent += 1
-            else:
-                failed += 1
-        report["metrics"]["followups_sent"] = sent
-        report["metrics"]["followups_due"] = len(due)
-        report["metrics"]["followups_failed"] = failed
+        metrics["followups_due_manual"] = len(due)
+        metrics["followups_sent"] = 0
+        if due:
+            log.info("followups: %d due, sending is retired", len(due))
 
     async def _stage_inbound(self, report: dict) -> None:
         """AI employee loop: scan email, match replies to CRM leads, act.
@@ -733,86 +547,14 @@ class Pipeline:
         report["metrics"]["inbound_auto_replied"] = auto_replied
 
     async def _stage_outreach_ig(self, leads: list[dict], report: dict) -> None:
-        cap = min(int(self.settings.crit("ig_dms_per_24h_max", IG_CAP_ABSOLUTE)), IG_CAP_ABSOLUTE)
+        """RETIRED as a sender. No Instagram DM leaves this system any more.
 
-        # Pre-flight (doc 4): if Meta flagged/restricted the connected account,
-        # the ENTIRE Instagram stage halts and a halted record is written.
-        # Unknown status fails OPEN (never halt on a missing tool).
-        if not self.settings.dry_run and self.composio.connected:
-            status = await self.composio.ig_account_status()
-            if status and status.get("restricted"):
-                reason = str(status.get("reason") or "Instagram account flagged by Meta")
-                report["metrics"]["ig_halted"] = reason
-                await self._ig_halt_record(reason)
-                log.warning("instagram stage halted: %s", reason)
-                return
-
-        sent = skipped = failed = queued = 0
-        no_email = 0
-        new_rows: list[list] = []
-        for idx, lead in enumerate(leads, start=1):
-            lid = lead_id(lead.get("name", ""), lead.get("address", ""))
-            name = lead.get("name", "")
-            tier = lead["score"]["tier"]
-            ig = lead.get("instagram") or ""
-            ig_verified = lead.get("ig_status") == "VERIFIED" or bool(ig)
-            if tier != "HOT-VERIFIED" or not ig_verified:
-                skipped += 1
-                new_rows.append(self._outreach_row(
-                    idx, name, lid, "", "instagram", "", "",
-                    "Skipped — not eligible", f"tier={tier} ig={'yes' if ig else 'no'}"))
-                continue
-            # Doc: DM eligible ONLY when an email attempt was made this run.
-            if lid not in self._email_attempted:
-                skipped += 1
-                no_email += 1
-                new_rows.append(self._outreach_row(
-                    idx, name, lid, "", "instagram", "", "",
-                    "Skipped — no email attempt this run",
-                    "IG eligibility requires an email attempt in this run"))
-                continue
-            message = self._ig_first_message(lead)
-            if sent >= cap:
-                queued += 1
-                new_rows.append(self._outreach_row(
-                    idx, name, lid, "", "instagram", "", message,
-                    "Queued (cap hit)", f"{cap}/24h reached"))
-                continue
-            status, note = "SENT", "Hot - DM sent"
-            if not self.settings.dry_run and self.composio.connected:
-                resp = await self.composio.ig_send_dm(recipient_id=ig, message=message)
-                if not resp.get("ok"):
-                    err = str(resp.get("error", ""))[:200]
-                    reason = self._ig_failure_reason(err)
-                    if reason == "cold_start":
-                        status, note = "Skipped — IG cold-start", err or "recipient must message first"
-                        skipped += 1
-                    elif reason == "window":
-                        status, note = "Skipped — IG 24h window", err or "outside Meta's 24h window"
-                        skipped += 1
-                    elif reason == "no_psid":
-                        status, note = "Skipped — IG no PSID", err or "handle needs resolving to a numeric PSID"
-                        skipped += 1
-                    else:
-                        status, note = "Failed", err or "unknown IG error"
-                        failed += 1
-                else:
-                    sent += 1
-            else:
-                sent += 1  # dry-run simulates the send
-            new_rows.append(self._outreach_row(
-                idx, name, lid, "", "instagram", "", message, status, note))
-
-        # Carry forward the Outreach table so IG outcomes are recorded, then
-        # append this run's IG rows (doc: outcomes must be written).
-        previous = await self.sheets.read_tab("Outreach")
-        merged = (previous[1:] if previous and previous[0] else []) + new_rows
-        await self.sheets.write_tab("Outreach", merged)
-        report["metrics"]["ig_sent"] = sent
-        report["metrics"]["ig_skipped"] = skipped
-        report["metrics"]["ig_failed"] = failed
-        report["metrics"]["ig_queued"] = queued
-        report["metrics"]["ig_skipped_no_email"] = no_email
+        The DM stage fired for HOT-VERIFIED leads that had an email attempt in
+        the same run, so it was part of the same automatic blast. The owner
+        sends everything himself, from his own accounts.
+        """
+        report.setdefault("metrics", {})["legacy_ig_retired"] = True
+        log.info("outreach-ig is retired: %d lead(s) ignored, no DMs sent", len(leads))
 
     async def _stage_pipeline(self, leads: list[dict], report: dict) -> None:
         rows = [
@@ -841,14 +583,438 @@ class Pipeline:
             ]
             for i, lead in enumerate(leads, start=1)
         ]
+        # "Manual" not "Queued": the cadence is no longer scheduled or sent by
+        # this system, and the sheet must not imply otherwise.
         followup = [
-            [i, lead.get("name"), "Day 0: intro", "Day 3: bump",
-             "Day 7: case study", "Day 14: final ask", "Queued"]
+            [i, lead.get("name"), "Day 0: intro (send yourself)", "Day 4: bump",
+             "Day 10: close", "Write your own for anything after that", "Manual"]
             for i, lead in enumerate(leads, start=1)
         ]
-        await self.sheets.write_tab("Pipeline", rows)
+        # The Pipeline tab is the research batch's work queue, so it ACCUMULATES:
+        # rewriting it with only this run's new leads wiped the queue on any run
+        # that found nothing new (cross-run dedupe settles at zero once a market
+        # is mined), which left the batch with nothing to inspect.
+        cap = int(self.settings.crit("pipeline_pool_max", 400))
+        existing = await self.sheets.read_tab("Pipeline")
+        merged = self._merge_pipeline_rows(existing, rows, cap)
+        await self.sheets.write_tab("Pipeline", merged)
         await self.sheets.write_tab("Followup", followup)
         report["metrics"]["pipeline_rows"] = len(rows)
+        report["metrics"]["pipeline_pool"] = len(merged)
+
+    @staticmethod
+    def _merge_pipeline_rows(existing: list[list] | None, new_rows: list[list],
+                             cap: int) -> list[list]:
+        """New leads first, then whatever was already queued, deduped and capped.
+
+        Keyed on lead_id(business_name, city) — the same id the research batch
+        uses, because the tab carries no street address. Existing rows are
+        rebuilt into PIPELINE_HEADER order first: passing a stale column order
+        through would silently shift every cell one column left.
+        """
+        name_i = PIPELINE_HEADER.index("business_name")
+        city_i = PIPELINE_HEADER.index("city")
+        merged: dict[str, list] = {}
+        for row in new_rows:
+            merged[lead_id(str(row[name_i]), str(row[city_i]))] = list(row)
+
+        if existing and existing[0]:
+            header = [str(h).strip() for h in existing[0]]
+            positions = {name: header.index(name) for name in PIPELINE_HEADER
+                         if name in header}
+            for row in existing[1:]:
+                if not any(str(c or "").strip() for c in row):
+                    continue
+                rebuilt = [
+                    (row[positions[name]] if name in positions and positions[name] < len(row)
+                     else "")
+                    for name in PIPELINE_HEADER
+                ]
+                name = str(rebuilt[name_i] or "").strip()
+                if not name:
+                    continue
+                merged.setdefault(lead_id(name, str(rebuilt[city_i] or "")), rebuilt)
+
+        rows = list(merged.values())[:cap]
+        for i, row in enumerate(rows, start=1):
+            row[0] = i  # rank reflects the queue order, not the old run
+        return rows
+
+    # ---------- daily research batch (detective -> writer -> closer) ----------
+    async def _load_pipeline_leads(self) -> list[dict]:
+        """Read the Pipeline tab as lead dicts, keyed by header name."""
+        rows = await self.sheets.read_tab("Pipeline")
+        if not rows or not rows[0]:
+            return []
+        header = [str(h).strip() for h in rows[0]]
+        idx = {h: i for i, h in enumerate(header)}
+
+        def cell(row: list, name: str) -> str:
+            i = idx.get(name)
+            if i is None or i >= len(row) or row[i] is None:
+                return ""
+            return str(row[i]).strip()
+
+        return [
+            {
+                "name": cell(row, "business_name"),
+                "email": cell(row, "verified_email"),
+                "website": cell(row, "official_site"),
+                "city": cell(row, "city"),
+                "vertical": cell(row, "trade"),
+                # Only used to make a reviews claim truthful: the copy says
+                # "though Google shows 4.9 from 80 reviews" when, and only
+                # when, the sheet actually carries that number.
+                "rating": cell(row, "rating"),
+                "review_count": cell(row, "review_count"),
+                "score": cell(row, "scout_score"),
+                "tier": cell(row, "scout_tier"),
+            }
+            for row in rows[1:]
+            if cell(row, "business_name")
+        ]
+
+    async def _stage_research_batch(self, leads: list[dict], report: dict) -> None:
+        """Ten businesses: one seen problem, one email, a day-4 and day-10 closer.
+
+        Nothing is sent. The table, the drafts and a CSV go to Telegram, the
+        drafts also go to the Drafts tab, and the NEXT ten wait for `/next` (the
+        owner asked to approve each batch before continuing).
+        """
+        metrics = report.setdefault("metrics", {})
+        state = self.state.load(site_research.STATE_FILE, site_research.new_state())
+        today = datetime.now(UTC).date().isoformat()
+        # /next sets force_next: an explicit request beats both gates, so the
+        # owner is never stuck waiting for the next cron tick.
+        force = bool(state.get("force_next"))
+
+        if state.get("awaiting_confirm") and not force:
+            metrics["research_awaiting_confirm"] = True
+            metrics["research_batch"] = 0
+            await self._notify(
+                f"Batch {state.get('batches', 0)} is done and waiting. "
+                "Send /next for the next 10 businesses."
+            )
+            return
+
+        if state.get("last_batch_date") == today and not force:
+            # One batch a day, even when the earlier one yielded nothing. Without
+            # this a zero-yield morning left the gate open and the 15:00 run
+            # produced a second batch of ten the same day.
+            metrics["research_batch"] = 0
+            metrics["research_already_ran"] = True
+            await self._notify(
+                "A research batch already went out today. Reply /next only if "
+                "you want another ten now."
+            )
+            return
+
+        pool = []
+        not_eligible = 0
+        for lead in leads:
+            if not site_research.eligible(lead):
+                not_eligible += 1
+                continue
+            pool.append({**lead, "id": site_research.lead_hash(lead)})
+
+        if not pool:
+            # Nothing to inspect is a different message from "nothing found":
+            # without a website and an email there is no detective work to do.
+            metrics["research_batch"] = 0
+            await self._notify(
+                f"No lead in the Pipeline tab has both a website and an email yet "
+                f"({len(leads)} leads, {not_eligible} missing one or the other), "
+                "so there was nothing to inspect today."
+            )
+            return
+
+        batch = site_research.select_batch(pool, state, today=today)
+        if not batch:
+            metrics["research_batch"] = 0
+            await self._notify(
+                "Every lead in the Pipeline tab has either been written to "
+                "already or is waiting on a retry date, so there was nothing "
+                "new to inspect today."
+            )
+            return
+
+        items: list[dict] = []
+        skipped: list[dict] = []
+        # Walk each defect's phrasings in order so ten plumbers in one batch do
+        # not receive the same observation with a different name in it.
+        used_variants: dict[str, int] = {}
+        for lead in batch:
+            problem, evidence = await site_research.inspect_site(lead["website"])
+            if problem is None:
+                # No readable page or no defect in the checked list: no email.
+                # Writing one anyway would mean inventing what we did not see.
+                reason = site_research.classify_skip(evidence)
+                skipped.append({"id": lead["id"], "reason": reason,
+                                "detail": evidence})
+                log.info("research: skipped %s (%s)",
+                         site_research.lead_hash(lead)[:8], evidence)
+                continue
+            variant = used_variants.get(problem.code, 0)
+            used_variants[problem.code] = variant + 1
+            subject, body = site_research.write_email(lead, problem, variant)
+            items.append({
+                **lead,
+                "problem": problem,
+                "evidence": evidence,
+                "subject": subject,
+                "body": body,
+                "closers": site_research.write_closers(lead["name"], problem),
+            })
+
+        metrics["research_inspected"] = len(batch)
+        metrics["research_batch"] = len(items)
+        metrics["research_no_problem"] = len(skipped)
+        metrics["research_not_eligible"] = not_eligible
+
+        if not items:
+            # The batch is recorded anyway: the inspected leads must not come
+            # back tomorrow, or the pool never advances past them.
+            self.state.save_if_changed(
+                site_research.STATE_FILE,
+                site_research.record_batch(state, [], skipped, today=today))
+            reasons = self._skip_summary(skipped)
+            await self._notify(
+                "Research batch: no business in this group had a readable site "
+                "with a problem I could actually see, so nothing was written. "
+                f"No emails were invented.\n{reasons}"
+            )
+            return
+
+        # Drafts tab: the owner still has to send these by hand. The Notes
+        # column carries the evidence so a draft can be checked against the
+        # site without re-reading the Telegram message.
+        for i, it in enumerate(items, start=1):
+            self._drafts_rows.append([
+                i, it["name"], it["id"], it["email"], it["subject"], it["body"],
+                it.get("score", ""), it.get("tier", ""), "NEEDS_APPROVAL",
+                today, f"Manual send. {it['evidence']}"[:200],
+            ])
+
+        header = (f"Research batch {state.get('batches', 0) + 1}: "
+                  f"{len(items)} emails from {len(batch)} businesses inspected, "
+                  f"{len(skipped)} skipped.")
+        if skipped:
+            header += f"\n{self._skip_summary(skipped)}"
+        table = site_research.format_table(items)
+        print(header + "\n" + site_research.format_table(items, html=False))
+        await self._notify(f"{header}\n{table}", html=True)
+        for chunk in site_research.format_drafts(items):
+            await self._notify(chunk)
+        await self._notify_file(
+            f"research-batch-{today}.csv", site_research.format_csv(items))
+        await self._notify("Nothing above has been sent. Reply /next for the next 10.")
+
+        self.state.save_if_changed(
+            site_research.STATE_FILE,
+            site_research.record_batch(state, items, skipped, today=today))
+
+    @staticmethod
+    def _skip_summary(skipped: list[dict]) -> str:
+        """Why leads were skipped, in plain words."""
+        counts: dict[str, int] = {}
+        for skip in skipped:
+            counts[skip["reason"]] = counts.get(skip["reason"], 0) + 1
+        return "Skipped: " + ", ".join(
+            f"{site_research.SKIP_LABELS.get(k, k)} ({v})"
+            for k, v in sorted(counts.items())
+        )
+
+    async def _flush_drafts(self, report: dict) -> None:
+        """Write the Drafts tab as a queue: a screenful of pending, rest archived.
+
+        The tab is read on a phone, so it must not grow past what fits there.
+        Pending rows survive; rows that are already sent/rejected, older than
+        ``drafts_stale_days``, or pushed out by newer ones move to DraftsArchive
+        (append-only) instead of piling up in the queue.
+        """
+        metrics = report.setdefault("metrics", {})
+        keep_max = int(self.settings.crit("drafts_max_rows", DRAFTS_MAX_ROWS))
+        stale_days = int(self.settings.crit("drafts_stale_days", DRAFTS_STALE_DAYS))
+
+        existing = await self.sheets.read_tab("Drafts")
+        pending: list[list] = []
+        archive: list[list] = []
+        if existing and existing[0]:
+            header = [str(h).strip() for h in existing[0]]
+            status_i = header.index("Status") if "Status" in header else None
+            for row in existing[1:]:
+                if not any(str(c or "").strip() for c in row):
+                    continue
+                status = (str(row[status_i] or "").strip()
+                          if status_i is not None and status_i < len(row) else "")
+                if status in ("NEEDS_APPROVAL", "APPROVED"):
+                    pending.append(list(row))
+                else:
+                    archive.append(list(row))  # SENT / REJECTED / SKIPPED
+
+        pending.extend(list(row) for row in self._drafts_rows)
+        kept, pushed_out = partition_drafts(
+            pending, datetime.now(UTC).date().isoformat(),
+            keep=keep_max, stale_days=stale_days)
+        archive.extend(pushed_out)
+
+        for i, row in enumerate(kept, start=1):
+            if row:
+                row[0] = i
+        await self.sheets.write_tab("Drafts", kept)
+
+        if archive:
+            previous = await self.sheets.read_tab("DraftsArchive")
+            history = ([list(r) for r in previous[1:]] if previous and previous[0] else [])
+            combined = partition_archive(history, archive, cap=ARCHIVE_MAX_ROWS)
+            await self.sheets.write_tab("DraftsArchive", combined)
+            metrics["drafts_archived"] = len(combined) - len(history)
+        metrics["drafts_kept"] = len(kept)
+
+    async def _stage_retired_senders(self, mode: str, report: dict) -> None:
+        """Answer a retired sending mode with an explanation, not a send."""
+        report.setdefault("metrics", {})[f"retired_{mode.replace('-', '_')}"] = True
+        await self._notify(
+            f"Mode {mode} is retired: this system no longer sends anything.\n\n"
+            "Outreach is the research batch now: ten businesses, one problem "
+            "seen on each business's own site, draft plus a day-4 and day-10 "
+            "closer, all written for you to send yourself.\n"
+            "Reply /next for the next ten."
+        )
+
+    async def _stage_purge_legacy(self, report: dict) -> None:
+        """One-time migration off the old templated flow (mode `purge`).
+
+        - Drafts tab: pending rows deleted. That tab was a log of mail the old
+          stage had already sent, not a queue waiting for a human.
+        - Outreach tab: rows still NEEDS_APPROVAL are marked REJECTED and kept
+          as history; nothing in that table is sendable any more.
+        - Approval queue: emptied, so no stale "approved" hash can fire.
+        - Research batch: every Lead ID the old flow ever touched is marked
+          done, so the new batch never writes to a business that already heard
+          from the template, and the daily gate is cleared so a batch can run
+          today.
+        """
+        metrics = report.setdefault("metrics", {})
+
+        def col(header: list, name: str) -> int | None:
+            for i, head in enumerate(header):
+                if str(head).strip() == name:
+                    return i
+            return None
+
+        def cell(row: list, idx: int | None) -> str:
+            if idx is None or idx >= len(row) or row[idx] is None:
+                return ""
+            return str(row[idx]).strip()
+
+        # 1. Drafts tab: the pile goes.
+        drafts = await self.sheets.read_tab("Drafts")
+        kept: list[list] = []
+        removed = 0
+        if drafts and drafts[0]:
+            status_i = col(drafts[0], "Status")
+            for row in drafts[1:]:
+                if cell(row, status_i) in ("NEEDS_APPROVAL", "APPROVED"):
+                    removed += 1
+                else:
+                    kept.append(row)
+        await self.sheets.write_tab("Drafts", kept)
+
+        # 2. Outreach tab: retire pending rows in place, remember every lead.
+        outreach = await self.sheets.read_tab("Outreach")
+        touched: list[str] = []
+        touched_names: set[str] = set()
+        retired = 0
+        rows_out: list[list] = []
+        if outreach and outreach[0]:
+            status_i = col(outreach[0], "Status")
+            lid_i = col(outreach[0], "Lead ID")
+            note_i = col(outreach[0], "Notes")
+            lead_i = col(outreach[0], "Lead")
+            for row in outreach[1:]:
+                row = list(row)
+                lid = cell(row, lid_i)
+                if lid:
+                    touched.append(lid)
+                name = cell(row, lead_i)
+                if name:
+                    touched_names.add(name.lower())
+                if cell(row, status_i) == "NEEDS_APPROVAL":
+                    if status_i is not None and status_i < len(row):
+                        row[status_i] = "REJECTED"
+                    if note_i is not None and note_i < len(row):
+                        row[note_i] = "Templated draft retired; nothing to send"
+                    retired += 1
+                rows_out.append(row)
+        await self.sheets.write_tab("Outreach", rows_out)
+
+        # 3. Approval queue: nothing may stay armed.
+        cleared = len(self.state.load("approvals", {}) or {})
+        self.state.save_if_changed("approvals", {})
+
+        # 4. Hand over to the batch flow: already-contacted stays already-contacted.
+        #    The ids above are lead_id(name, address); the batch keys on
+        #    lead_hash(name, city or address), and the Pipeline tab carries no
+        #    street address. Seeding only the raw ids would therefore miss
+        #    everyone and mail them a second time, so the queued Pipeline leads
+        #    are matched by name against the old Outreach rows and marked with
+        #    the hash the batch actually uses. Skipping beats emailing twice.
+        state = self.state.load(site_research.STATE_FILE, site_research.new_state())
+        pipeline_rows = await self.sheets.read_tab("Pipeline")
+        batch_ids: list[str] = []
+        if pipeline_rows and pipeline_rows[0]:
+            p_name = col(pipeline_rows[0], "business_name")
+            p_city = col(pipeline_rows[0], "city")
+            for row in pipeline_rows[1:]:
+                name = cell(row, p_name)
+                if name and name.lower() in touched_names:
+                    batch_ids.append(site_research.lead_hash(
+                        {"name": name, "city": cell(row, p_city)}))
+        done = list(dict.fromkeys(
+            [*(state.get("done") or []), *touched, *batch_ids]))
+        self.state.save_if_changed(
+            site_research.STATE_FILE,
+            {**site_research.new_state(), "done": done,
+             "batches": state.get("batches", 0)},
+        )
+
+        metrics["purge_drafts_removed"] = removed
+        metrics["purge_outreach_retired"] = retired
+        metrics["purge_approvals_cleared"] = cleared
+        metrics["purge_leads_remembered"] = len(done)
+        await self._notify(
+            "Legacy outreach purged. Nothing was sent.\n"
+            f"Drafts removed: {removed}\n"
+            f"Outreach rows retired: {retired}\n"
+            f"Approval entries cleared: {cleared}\n"
+            f"Businesses marked already contacted: {len(done)}\n\n"
+            "The research batch takes over from here. Reply /next for ten now."
+        )
+
+    async def _notify(self, text: str, html: bool = False) -> None:
+        """Telegram message; a dry run prints instead of sending."""
+        if self.settings.dry_run:
+            print(text)
+            return
+        if html:
+            send_html = getattr(self.notifier, "notify_html", None)
+            if send_html is not None and await send_html(text):
+                return
+            # No HTML support on this notifier: degrade to plain text rather
+            # than showing the owner raw <pre> tags.
+            text = text.replace("<pre>", "").replace("</pre>", "")
+        await self.notifier.notify(text)
+
+    async def _notify_file(self, filename: str, content: str) -> None:
+        """Attach the batch as a document; a dry run says what it would send."""
+        if self.settings.dry_run:
+            print(f"[dry-run] would attach {filename} ({len(content)} bytes)")
+            return
+        send_doc = getattr(self.notifier, "notify_document", None)
+        if send_doc is None:
+            return
+        await send_doc(filename, content)
 
     # ---------- helpers ----------
     def _check_stop(self) -> None:
@@ -864,19 +1030,6 @@ class Pipeline:
             hook = "no website at all, so jobs are slipping away today"
         return hook or "manual follow-up is eating time"
 
-    @classmethod
-    def _pick_subject(cls, lead: dict) -> str:
-        """2-4 word, boring, internal-looking subject (cold-email skill).
-
-        Picks deterministically from the vertical's pool (hashed on the lead
-        name) so every lead gets a varied subject and the same lead always
-        gets the same one across runs (spintax variation).
-        """
-        vertical = str(lead.get("vertical") or "default").lower()
-        pool = cls.SUBJECT_POOL.get(vertical, cls.SUBJECT_POOL["default"])
-        key = lead.get("name") or lead.get("address") or ""
-        return pool[sum(ord(c) for c in key) % len(pool)]
-
     async def _draft_email(self, lead: dict) -> tuple[str, str]:
         """5-part B2B cold email framework (combined from 14 video deep-dive).
 
@@ -888,49 +1041,19 @@ class Pipeline:
         5. SOFT CTA - ask for reply, not meeting (all 14 videos agree)
 
         Rules enforced:
-        - Subject: 2-4 words, boring/internal-looking (Hormozi: "boring = gets opened")
-        - Opening: signal-based personalization, not "I came across"
+        - Subject: 2-5 words, boring/internal-looking (Hormozi: "boring = gets opened")
         - Body: 40-80 words (2026 benchmark: reply rates drop above 80 words)
         - No links, no attachments, no urgency, no spam trigger words
         - CTA: yes/no question, lowest friction possible
         """
-        subject = self._pick_subject(lead)
-        facts = self._lead_facts(lead)
-        city = lead.get("city", "your city")
-        vertical = lead.get("vertical", "service")
-        rating = lead.get("rating") or "4"
-        reviews = lead.get("reviews") or "dozens of"
-        has_website = bool(lead.get("website"))
-
-        # Part 1: CONTEXT (signal-based personalization, SMYKM — about THEM).
-        # Part 2-3: PROBLEM + PROOF. Part 4: single interest CTA question.
-        # Playbook hard limits: <= 90 words, 3-4 sentences, ONE "?", no I/we
-        # opener, no links (lint_email blocks violations before any send).
-        hook = self._hook(lead)
-        if has_website:
-            context = (
-                f"Your {rating} star profile in {city} with {reviews} reviews "
-                f"suggests {hook if hook else 'after-hours calls are going to voicemail'}."
-            )
-        else:
-            context = (
-                f"Your {rating} star profile in {city} with {reviews} reviews "
-                f"and no online booking suggests calls are slipping after hours."
-            )
-        problem_proof = (
-            f"A {city} {vertical} shop fixed the same gap with an AI follow-up "
-            f"system and added 11 extra bookings in the first month, paying "
-            f"only from the jobs it booked."
-        )
-        cta = "Worth a look for your shop?"
-
-        body = (
-            f"{context}\n\n"
-            f"{problem_proof}\n\n"
-            f"{cta}"
-        )
+        # Sector-routed copy (plumbing / HVAC / dental). The previous version
+        # carried ONE body for every recipient plus an invented "11 extra
+        # bookings" proof line; both are gone. sector_copy raises
+        # UnsupportedSector for anything outside the three sectors instead of
+        # sending a plumber's email to a storage unit.
+        subject, body = sector_copy_draft(lead)
         if self.llm.available:
-            body = await self._humanize(facts, body)
+            body = await self._humanize(self._lead_facts(lead), body)
         return subject, body
 
     # ---------- ANCHOR human-writer rules (doc 4) ----------
@@ -1174,6 +1297,16 @@ class Pipeline:
                              "(run 'full' or 'outreach-email' first)")
             if metrics.get("ig_halted"):
                 lines.append(f"⚠️ IG stage HALTED: {metrics['ig_halted']}")
+            if "research_batch" in metrics:
+                note = ""
+                if metrics.get("research_awaiting_confirm"):
+                    note = " - waiting for /next"
+                elif metrics.get("research_already_ran"):
+                    note = " - already ran today"
+                lines.append(
+                    f"Research batch: {metrics['research_batch']} drafted "
+                    f"({metrics.get('research_no_problem', 0)} skipped, nothing seen){note}"
+                )
             if metrics.get("sheet_tabs_failed"):
                 lines.append(f"⚠️ Sheet write FAILED for {metrics['sheet_tabs_failed']} tab(s) "
                              f"({metrics.get('sheet_tabs_written', 0)} ok)")

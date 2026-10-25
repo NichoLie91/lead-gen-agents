@@ -1,15 +1,9 @@
 {
   "verticals": [
-    "plumber", "hvac", "ac repair", "heating repair",
-    "cleaning", "house cleaning", "commercial cleaning",
-    "mechanic", "auto repair", "auto body",
-    "dental clinic", "dentist", "orthodontist", "cosmetic dentistry",
-    "pediatric dentistry", "dental implants",
-    "electrician", "locksmith", "roofer",
-    "pest control", "landscaper", "tree service",
-    "painter", "flooring", "pool service", "appliance repair",
-    "chiropractor", "physical therapy", "veterinarian",
-    "storage unit", "moving company"
+    "plumber", "drain cleaning", "water heater", "sewer repair",
+    "hvac", "ac repair", "heating repair", "air conditioning",
+    "dental", "dental clinic", "cosmetic dentistry", "pediatric dentistry",
+    "dental implants", "orthodontics"
   ],
   "metros": [
     "Houston", "Dallas", "Fort Worth", "San Antonio", "Austin",
@@ -33,6 +27,8 @@
   "ig_dms_per_24h_max": 15,
   "query_shape": "{vertical} in {city} website email phone",
   "sender": {
-    "physical_address": ""
+    "name": "Nicholas",
+    "business_name": "",
+    "physical_address": "PO Box 10116, New York, NY 10116"
   }
 }

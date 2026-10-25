@@ -7,6 +7,7 @@ from src.agents.atlas import (
     is_closed,
     passes_target_gate,
 )
+from src.agents.maps_agent import _business_name
 
 
 def test_chain_detection():
@@ -51,6 +52,23 @@ def test_in_pool_chain_flag():
     assert "local shop" not in chains
 
 
+def test_mock_names_terminate_past_the_prefix_count():
+    """criteria.json ships 24 metros but only 20 name prefixes. The generator
+    used to retry the same 20 names forever and hang every dry run."""
+    taken: set[str] = set()
+    names = [_business_name(i, "plumber", taken) for i in range(24)]
+    assert len(set(names)) == 24
+
+
+def test_mock_names_cover_new_verticals():
+    """criteria.json can list any vertical; offline discovery used to raise
+    ValueError on anything outside _VERTICAL_TITLES ('drain cleaning')."""
+    taken: set[str] = set()
+    names = [_business_name(i, "drain cleaning", taken) for i in range(4)]
+    assert all(n.endswith("Drain Cleaning") for n in names)
+    assert len(set(names)) == 4  # unique per metro, or chain detection zeroes the pool
+
+
 def test_target_gate_requires_4_4_stars():
     """Job doc 1: target businesses are 4.4-5 stars."""
     assert passes_target_gate({"rating": 4.4, "reviews": 50}) is True
@@ -61,3 +79,56 @@ def test_target_gate_requires_4_4_stars():
     assert passes_target_gate({"rating": None, "reviews": 50}) is False  # can't confirm
     assert passes_target_gate({"rating": "4.6", "reviews": "80"}) is True  # strings ok
     assert passes_target_gate({"rating": "junk", "reviews": 50}) is False  # malformed
+
+
+# ---------- discovery must fail loudly, not silently ----------
+
+def _maps_agent_with(composio, settings):
+    from src.agents.maps_agent import MapsAgent
+    return MapsAgent(composio, settings)
+
+
+class _DeadProvider:
+    """Every Maps call fails the way a disabled toolkit does."""
+
+    connected = True
+
+    async def search_google_maps(self, query, start=0):
+        return []
+
+
+class _LiveProvider:
+    connected = True
+
+    async def search_google_maps(self, query, start=0):
+        return [{"name": "Acme Plumbing", "address": "1 Main St",
+                 "phone": "555-0100", "website": ""}]
+
+
+def test_discovery_raises_when_every_query_fails(monkeypatch):
+    """A dead provider must not look like an empty market (2026-10-24: 750/750
+    Google Maps calls returned 403 and the run still reported COMPLETED)."""
+    import asyncio
+
+    import pytest
+
+    from src.agents.maps_agent import DiscoveryUnavailable
+    from src.core.config import Settings
+
+    settings = Settings(dry_run=False)
+    agent = _maps_agent_with(_DeadProvider(), settings)
+    with pytest.raises(DiscoveryUnavailable):
+        asyncio.run(agent.discover(verticals=["plumber"], metros=["Houston"]))
+
+
+def test_discovery_returns_leads_when_provider_works():
+    import asyncio
+
+    from src.core.config import Settings
+
+    settings = Settings(dry_run=False)
+    agent = _maps_agent_with(_LiveProvider(), settings)
+    pool = asyncio.run(agent.discover(verticals=["plumber"], metros=["Houston"]))
+    assert len(pool) == 1
+    assert pool[0]["vertical"] == "plumber"
+    assert pool[0]["city"] == "Houston"

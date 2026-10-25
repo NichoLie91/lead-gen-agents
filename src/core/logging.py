@@ -34,13 +34,39 @@ class TelegramNotifier:
         return self._enabled
 
     async def notify(self, text: str) -> bool:
+        return await self._send({"chat_id": self._chat_id, "text": text[:4096]})
+
+    async def notify_html(self, text: str) -> bool:
+        """Same message rendered as HTML (used for the <pre> batch table)."""
+        return await self._send({
+            "chat_id": self._chat_id, "text": text[:4096],
+            "parse_mode": "HTML",
+        })
+
+    async def notify_document(self, filename: str, content: str) -> bool:
+        """Attach a generated file (the research batch CSV) to the chat."""
+        if not self._enabled:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                resp = await client.post(
+                    f"{TELEGRAM_API}/bot{self._token}/sendDocument",
+                    data={"chat_id": self._chat_id, "caption": filename[:200]},
+                    files={"document": (filename, content.encode("utf-8"),
+                                        "text/csv")},
+                )
+            return resp.status_code == 200
+        except httpx.HTTPError as exc:
+            logging.getLogger(__name__).warning("Telegram document failed: %s", exc)
+            return False
+
+    async def _send(self, payload: dict) -> bool:
         if not self._enabled:
             return False
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
-                    f"{TELEGRAM_API}/bot{self._token}/sendMessage",
-                    json={"chat_id": self._chat_id, "text": text[:4096]},
+                    f"{TELEGRAM_API}/bot{self._token}/sendMessage", json=payload,
                 )
             return resp.status_code == 200
         except httpx.HTTPError as exc:  # never let alerts break the pipeline

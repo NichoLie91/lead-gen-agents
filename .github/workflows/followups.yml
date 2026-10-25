@@ -1,12 +1,12 @@
 name: followups
 
-# AI employee loop: send due Day 3 / 7 / 14 follow-ups to contacted leads.
-# Runs daily at 08:00 UTC; shares the pipeline concurrency group so it never
-# collides with a pipeline/inbound run (they all write the same sheets).
+# RETIRED as a sender. The Day 3/7/14 cadence was automated off the old
+# templated first touch, so there is nothing left for it to send. The schedule
+# is off to stop burning a daily run on a no-op; the workflow stays for manual
+# debugging and now only reports what the CRM thinks is due (`followups_due_manual`)
+# without sending anything.
 on:
-  schedule:
-    - cron: "0 8 * * *"
-  workflow_dispatch:           # manual run for debugging
+  workflow_dispatch:           # manual run only; no schedule while retired
 
 concurrency:
   group: pipeline

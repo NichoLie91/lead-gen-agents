@@ -89,7 +89,9 @@ def test_delegate_approve_all(tmp_path):
     lead.approvals.register("a" * 64)
     lead.approvals.register("b" * 64)
     reply = asyncio.run(lead.delegate("/approve", "all", 0))
-    assert "Approved 2 draft" in reply
+    # Approving marks the draft; it no longer promises an automatic send.
+    assert "Marked 2 draft" in reply
+    assert "send them yourself" in reply.lower()
     assert len(lead.approvals.pending()) == 0
 
 
@@ -145,11 +147,11 @@ def test_handle_message_exact_command_fast_path(tmp_path):
 def test_handle_message_free_text_to_command(tmp_path):
     settings, state = make_harness(tmp_path)
     github = FakeGithub()
-    llm = FakeLLM('{"action": "command", "command": "/followups", "args": ""}')
+    llm = FakeLLM('{"action": "command", "command": "/inbound", "args": ""}')
     lead = LeadAgent(settings, state, github=github, llm=llm)
-    reply = asyncio.run(lead.handle_message("send the follow-ups", 0))
-    assert github.calls == ["followups"]
-    assert "mode=followups" in reply
+    reply = asyncio.run(lead.handle_message("check for replies", 0))
+    assert github.calls == ["inbound"]
+    assert "mode=inbound" in reply
 
 
 def test_handle_message_free_text_reply(tmp_path):

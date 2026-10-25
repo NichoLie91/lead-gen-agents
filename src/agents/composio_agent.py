@@ -115,6 +115,14 @@ class ComposioAgent:
         self._slugs: dict[str, str] = {}
         self._slugs_resolved = False
         self._account_by_toolkit: dict[str, str] = {}
+        # Every catalog action for a purpose, best-first (see _candidates).
+        self._candidate_slugs: dict[str, list[str]] = {}
+        # Maps provider failover: slug -> first error text seen this process.
+        # A slug that fails once is dead for the run (execute_action already
+        # retried the retryable cases), so discovery does not burn 800 queries
+        # re-hitting a 403-ing provider.
+        self._maps_failures: dict[str, str] = {}
+        self._maps_winner: str = ""
         # Per-run URL cache: chatbot/agency checks + email enrichment fetch the
         # same lead homepage, so one Tavily extract per URL per run (quota).
         self._url_cache: dict[str, str] = {}
@@ -162,6 +170,40 @@ class ComposioAgent:
     def slug(self, purpose: str) -> str:
         return self._slugs.get(purpose) or SLUG_ALIASES.get(purpose, [""])[0]
 
+    def _candidates(self, purpose: str) -> list[str]:
+        """Every catalog action that can serve ``purpose``, best-first.
+
+        A single resolved slug is fragile: on 2026-10-24 the Maps toolkit
+        returned 403 for all 750 queries and discovery reported an empty market
+        while other Maps actions in the same catalog were never called. Trying
+        the candidates in order turns one dead provider into a fallback instead
+        of a failed run.
+        """
+        cands = list(self._candidate_slugs.get(purpose) or [])
+        if not cands:
+            chosen = self._slugs.get(purpose)
+            static = [c for c in SLUG_ALIASES.get(purpose, []) if c]
+            cands = ([chosen] + [c for c in static if c != chosen]) if chosen else static
+        return cands
+
+    def maps_provider(self) -> str:
+        """Which Maps action actually answered this run ('' if none)."""
+        return self._maps_winner
+
+    def maps_diagnostics(self) -> str:
+        """Per-provider failure text, for the run report / alert."""
+        if self._maps_winner:
+            return f"{self._maps_winner} is answering"
+        if not self._maps_failures:
+            return "no Google Maps provider was attempted"
+        return "; ".join(f"{slug}: {err[:120]}"
+                         for slug, err in self._maps_failures.items())
+
+    def has_maps_provider(self) -> bool:
+        """False once every Maps action has failed in this process."""
+        return any(slug not in self._maps_failures
+                   for slug in self._maps_attempt_order())
+
     async def resolve_slugs(self) -> None:
         """Resolve canonical action slugs against the live v3 catalog.
 
@@ -202,6 +244,27 @@ class ComposioAgent:
                     chosen = fallback
                 if chosen:
                     self._slugs[purpose] = chosen
+            # Keep every viable candidate, not just the winner, so a purpose
+            # with a dead provider can fall through (see _candidates).
+            self._candidate_slugs = {}
+            for purpose, candidates in SLUG_ALIASES.items():
+                ordered = [c for c in candidates if c in available]
+                ordered.sort(key=lambda c: 0 if self._toolkit_for(c) in self._account_by_toolkit else 1)
+                chosen = self._slugs.get(purpose)
+                if chosen:
+                    ordered = [chosen] + [c for c in ordered if c != chosen]
+                self._candidate_slugs[purpose] = ordered
+            # Any other Places/Maps search action the catalog exposes (a newer
+            # slug should be usable without a code change).
+            extra = sorted(
+                s for s in available
+                if "MAP" in s.upper()
+                and any(word in s.upper() for word in ("SEARCH", "PLACES", "NEARBY"))
+                and not any(word in s.upper() for word in ("DETAIL", "PHOTO", "REVIEW"))
+            )
+            maps = list(dict.fromkeys(
+                self._candidate_slugs.get("maps_search", []) + extra))
+            self._candidate_slugs["maps_search"] = maps
             self._slugs_resolved = True
         except Exception as exc:
             log.warning("resolve_slugs failed: %s", exc)
@@ -306,21 +369,63 @@ class ComposioAgent:
             await asyncio.sleep(delay)
 
     # ---------- higher-level tools ----------
+    def _maps_attempt_order(self) -> list[str]:
+        """Maps candidates, the proven winner first."""
+        cands = self._candidates("maps_search")
+        if self._maps_winner:
+            cands = [self._maps_winner] + [c for c in cands if c != self._maps_winner]
+        return cands
+
+    @staticmethod
+    def _maps_params(slug: str, query: str) -> dict:
+        """The action differs in its query param name: Google Places uses
+        ``textQuery``; SerpAPI/ZenSerp use ``q``.
+
+        The prefix test is anchored: SERPAPI_GOOGLE_MAPS_SEARCH contains
+        "GOOGLE_MAPS" but takes ``q``, and sending it a Places body fails.
+        """
+        if slug.upper().startswith("GOOGLE_MAPS"):
+            return {
+                "textQuery": query, "maxResultCount": 20,
+                "fieldMask": "places.id,places.displayName,places.formattedAddress,"
+                             "places.nationalPhoneNumber,places.websiteUri,"
+                             "places.rating,places.userRatingCount,places.businessStatus",
+            }
+        return {"q": query}
+
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:
-        # The resolved action differs in its query param name: Google Places
-        # (GOOGLE_MAPS_TEXT_SEARCH) uses ``textQuery``; SerpAPI/ZenSerp use ``q``.
-        slug = self.slug("maps_search")
-        if "GOOGLE_MAPS" in slug.upper():
-            params = {"textQuery": query, "maxResultCount": 20,
-                      "fieldMask": "places.id,places.displayName,places.formattedAddress,"
-                                    "places.nationalPhoneNumber,places.websiteUri,"
-                                    "places.rating,places.userRatingCount,places.businessStatus"}
-        else:
-            params = {"q": query}
-        resp = await self.execute_action(slug, params)
-        if not resp.get("ok"):
-            return []
-        return self._normalize_maps(resp.get("data", {}))
+        """Local business listings, failing over across every Maps action.
+
+        The first answer wins and is remembered, so the other providers are
+        probed once per run at most. A provider that errors is dropped for the
+        rest of the process; an ok-but-empty answer from a provider that has
+        not yet proven itself moves on to the next candidate (a narrow query is
+        not evidence that the provider works).
+        """
+        for slug in self._maps_attempt_order():
+            if slug in self._maps_failures:
+                continue
+            resp = await self.execute_action(slug, self._maps_params(slug, query))
+            if not resp.get("ok"):
+                # Never swallow this silently: a disabled toolkit looks exactly
+                # like "no businesses in this metro" at the end of the run.
+                err = str(resp.get("error") or "unknown error")[:300]
+                self._maps_failures[slug] = err
+                if self._maps_winner == slug:
+                    self._maps_winner = ""
+                log.warning("Maps provider %s failed (%s); trying the next one",
+                            slug, err[:160])
+                continue
+            items = self._normalize_maps(resp.get("data", {}))
+            if items:
+                self._maps_winner = slug
+                self._maps_failures.pop(slug, None)
+                return items
+            if self._maps_winner:
+                # A provider that has already answered for this run simply has
+                # nothing for this query; do not spend the others' quota.
+                return []
+        return []
 
     @staticmethod
     def _normalize_maps(data) -> list[dict]:

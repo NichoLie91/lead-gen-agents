@@ -73,6 +73,7 @@ COMMAND_OWNERS = {
     "/help": (),
     "/id": (),
     "/usage": (),
+    "/next": ("Outreach",),
 }
 
 
@@ -142,9 +143,11 @@ class LeadAgent:
                 mode = "full"
             return await self.github.trigger_pipeline(mode)
         if command == "/send all email":
-            return await self.github.trigger_pipeline("outreach-email")
+            # Retired with the templated sequence: the owner sends from his own
+            # mailbox, so no code path here can put mail on someone's screen.
+            return self._sending_retired()
         if command == "/send all instagram":
-            return await self.github.trigger_pipeline("outreach-ig")
+            return self._sending_retired()
         if command == "/stop":
             self.github.set_stop()
             return "Stop flag set. The running pipeline will halt between stages."
@@ -159,10 +162,91 @@ class LeadAgent:
         if command == "/inbound":
             return await self.github.trigger_pipeline("inbound")
         if command == "/followups":
-            return await self.github.trigger_pipeline("followups")
+            return self._sending_retired()
+        if command == "/purge":
+            return await self.github.trigger_pipeline("purge")
         if command == "/usage":
             return self._usage_report(args)
+        if command == "/next":
+            return await self._next_batch()
+        if command == "/batch":
+            return self._batch_report()
         return "Unknown command. Send /help."
+
+    @staticmethod
+    def _sending_retired() -> str:
+        """The one answer for every retired send command.
+
+        Nothing in this system sends email or DMs. The templated sequence that
+        did (and that auto-approved its own drafts) is gone; the research batch
+        writes ten drafts a day for the owner to send himself.
+        """
+        return (
+            "Sending is retired: this system does not send email or DMs.\n\n"
+            "The drafts are in the Drafts tab and in the daily research batch "
+            "message. Send them yourself. Reply /next to have the next ten "
+            "written."
+        )
+
+    async def _next_batch(self) -> str:
+        """Confirm the research batch and write the next ten.
+
+        The daily run writes ten businesses and then waits: the owner asked to
+        approve each batch before more are written. ``force_next`` is what makes
+        an explicit request beat the daily-one-batch guard, so /next always runs
+        a batch even when the last one produced nothing to confirm.
+        """
+        from src import site_research
+
+        state = self.state.load(site_research.STATE_FILE, site_research.new_state())
+        waiting = bool(state.get("awaiting_confirm"))
+        state = {**state, "awaiting_confirm": False, "force_next": True}
+        self.state.save_if_changed(site_research.STATE_FILE, state)
+        prefix = "Confirmed. " if waiting else (
+            "No batch was waiting, so this one runs now. "
+        )
+        return prefix + await self.github.trigger_pipeline("batch")
+
+    def _batch_report(self) -> str:
+        """What the research batches have done, and why leads were skipped.
+
+        Read from state only (PII-safe, no sheet call): whether the Pipeline is
+        full of blocked sites or clean ones is the one number that says whether
+        this flow is worth running.
+        """
+        from src import site_research
+
+        state = self.state.load(site_research.STATE_FILE, site_research.new_state())
+        last_run = self.state.load("last_run", {}) or {}
+        metrics = (last_run.get("metrics") or {}) if isinstance(last_run, dict) else {}
+
+        status = ("waiting for /next" if state.get("awaiting_confirm")
+                  else "ready for the next batch")
+        lines = [
+            f"Research batches run: {state.get('batches', 0)}",
+            f"Last batch: {state.get('last_batch_date') or 'never'}",
+            f"Status: {status}",
+        ]
+        if "research_batch" in metrics:
+            lines.append(
+                f"Last batch: {metrics.get('research_batch', 0)} emails from "
+                f"{metrics.get('research_inspected', 0)} inspected"
+            )
+            if metrics.get("research_not_eligible"):
+                lines.append(
+                    f"Leads without a website or email: "
+                    f"{metrics['research_not_eligible']}"
+                )
+        skips = state.get("last_skips") or {}
+        if skips:
+            lines.append("Skipped in the last batch: " + ", ".join(
+                f"{site_research.SKIP_LABELS.get(k, k)} ({v})"
+                for k, v in sorted(skips.items())))
+        retrying = len(state.get("retry") or {})
+        if retrying:
+            lines.append(f"Waiting on a retry date: {retrying}")
+        lines.append("Nothing has been sent by this flow and nothing will be.")
+        return "\n".join(lines)
 
     # ---------- dashboard: which Gemini key/model handled recent calls ----------
     def _usage_report(self, n: str = "") -> str:
@@ -205,12 +289,15 @@ class LeadAgent:
     def _approve_drafts(self, args: str) -> str:
         if args and args.lower() != "all":
             if self.approvals.decide(args, "approved"):
-                return f"✅ Approved draft {args[:8]}. It sends on the next /send all email."
+                return (f"Marked draft {args[:8]} as approved. Nothing sends "
+                        "automatically; send it yourself from the Drafts tab.")
             return f"No pending draft matches '{args[:16]}'. Try /list drafts."
         count = self.approvals.decide_all("approved")
         if count:
-            return f"✅ Approved {count} draft(s). They send on the next /send all email."
-        return "No drafts waiting for approval. WARM drafts appear after an outreach run."
+            return (f"Marked {count} draft(s) approved. Nothing sends automatically; "
+                    "send them yourself from the Drafts tab.")
+        return ("No drafts waiting in the old approval queue. The research batch "
+                "writes its drafts straight to the Drafts tab.")
 
     def _reject_drafts(self, args: str) -> str:
         if args and args.lower() != "all":
@@ -512,6 +599,7 @@ class LeadAgent:
         if not name:
             return "I need the business name. Example: 'draft an email for ABC Plumbing in Dallas'"
         from src.pipeline import Pipeline
+        from src.sector_copy import UnsupportedSector
         pipe = Pipeline(self.settings)
         lead = {
             "name": name,
@@ -524,7 +612,14 @@ class LeadAgent:
             "email": params.get("email", ""),
             "instagram": params.get("instagram", ""),
         }
-        subject, body = await pipe._draft_email(lead)
+        try:
+            subject, body = await pipe._draft_email(lead)
+        except UnsupportedSector:
+            return (
+                f"No draft for {name}: this pipeline only writes plumbing, HVAC "
+                "and dental first-touch copy, and guessing a sector is what we "
+                "just removed. Give me the vertical and try again."
+            )
         return (
             f"📧 Draft for {name}:\n\n"
             f"Subject: {subject}\n\n"

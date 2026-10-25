@@ -95,31 +95,10 @@ def test_ig_first_message_mentions_no_website_observation():
     assert "missed calls" in msg.lower()  # the observation-and-question format
 
 
-# ---------- cold-email skill (2-4 word subjects, varied per lead) ----------
-
-def test_subject_pool_is_short_and_varied():
-    # Every subject in every pool is 2-4 words (skill rule), and the same
-    # vertical has more than one option so leads don't all get identical mail.
-    for vertical, pool in Pipeline.SUBJECT_POOL.items():
-        assert len(pool) >= 2, f"{vertical} needs variation"
-        for s in pool:
-            assert 2 <= len(s.split()) <= 4, f"subject '{s}' not 2-4 words"
-
-
-def test_pick_subject_is_deterministic_and_varies_across_leads():
-    a = Pipeline._pick_subject({"name": "Blue Creek Plumbing", "vertical": "plumber"})
-    b = Pipeline._pick_subject({"name": "Blue Creek Plumbing", "vertical": "plumber"})
-    assert a == b  # same lead always gets the same subject (spintax stability)
-    subjects = {Pipeline._pick_subject({"name": n, "vertical": "plumber"})
-                for n in ("Alpha Plumbing", "Bravo Plumbing", "Charlie Plumbing",
-                          "Delta Plumbing", "Echo Plumbing", "Foxtrot Plumbing")}
-    assert len(subjects) > 1  # different leads get varied subjects
-
-
-def test_pick_subject_falls_back_for_unknown_vertical():
-    s = Pipeline._pick_subject({"name": "Mystery Co", "vertical": "alien"})
-    assert 2 <= len(s.split()) <= 4
-
+# ---------- cold-email skill (short subjects, sector-varied) ----------
+# Subject/copy selection now lives in src/sector_copy.py and is covered by
+# tests/test_sector_copy.py. There is deliberately no generic subject pool:
+# an unknown vertical raises instead of falling back to "Quick question".
 
 # ---------- humanizer skill: spam trigger words ----------
 

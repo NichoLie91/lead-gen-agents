@@ -5,7 +5,10 @@ from __future__ import annotations
 COMMAND_HELP = {
     "/help": "Show available commands",
     "/status": "Latest execution report & metrics (how the last run did)",
-    "/run": "Trigger an immediate pipeline run: /run, or /run <mode> (full | discovery | enrichment | outreach-email | outreach-ig | followups | inbound | report)",
+    "/run": "Trigger an immediate pipeline run: /run, or /run <mode> (full | discovery | enrichment | outreach-email | outreach-ig | followups | inbound | report | batch)",
+    "/next": "Confirm the research batch and write the next 10 businesses (nothing is ever sent)",
+    "/batch": "Research batch status: how many ran, what was drafted, why leads were skipped",
+    "/purge": "One-time cleanup: delete the old templated drafts and hand over to the research batch (sends nothing)",
     "/list drafts": "List WARM drafts waiting for your approval",
     "/drafts": "Show all drafts in the Drafts tab (pending + sent)",
     "/approve": "Approve drafts: /approve all, or /approve <id> from /list drafts",
@@ -15,8 +18,8 @@ COMMAND_HELP = {
     "/followups": "Send due Day 3/7/14 follow-ups now",
     "/stop": "Halt the running execution",
     "/sheet": "Google Sheet link from the last batch",
-    "/send all email": "Send all emails from the approved leads",
-    "/send all instagram": "Send all leads an Instagram DM",
+    "/send all email": "Retired: this system does not send email (drafts are yours to send)",
+    "/send all instagram": "Retired: this system does not send Instagram DMs",
     "/id": "Show your Telegram user ID (for the admin allow-list)",
     "/usage": "Which Gemini key + model handled the last N LLM calls (/usage, or /usage 50)",
 }

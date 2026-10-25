@@ -32,7 +32,8 @@ from src.core.state import StateStore
 
 log = logging.getLogger(__name__)
 
-TABS = ("Pipeline", "Score", "Outreach", "Drafts", "Followup", "CRM")
+TABS = ("Pipeline", "Score", "Outreach", "Drafts", "Followup", "CRM",
+        "DraftsArchive")
 
 SCORING_SUMMARY_HEADER = ["Metric", "Value"]
 
@@ -75,6 +76,9 @@ HEADERS = {
     "Drafts": DRAFTS_HEADER,
     "Followup": FOLLOWUP_HEADER,
     "CRM": CRM_HEADER,
+    # Sent/rejected/stale drafts leave the Drafts queue for here, so the queue
+    # stays a screenful. Same schema, append-only.
+    "DraftsArchive": DRAFTS_HEADER,
 }
 
 # Pause between live tab writes so bursts of clear+update calls stay well under

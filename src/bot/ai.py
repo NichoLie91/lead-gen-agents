@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # Pipeline modes the GitHub workflow accepts (must match pipeline.yml inputs).
 RUN_MODES = (
     "full", "discovery", "enrichment", "outreach-email", "outreach-ig",
-    "followups", "inbound", "report",
+    "followups", "inbound", "report", "batch", "purge",
 )
 
 # Whitelisted commands Gemini may suggest. Derived from the real command table
@@ -36,11 +36,17 @@ COMMANDS_WITH_ARGS = {"/approve", "/reject", "/run", "/usage"}
 _ACTIONS_DESCRIPTION = (
     "/run — trigger the pipeline (optionally /run <mode>: full | discovery | "
     "enrichment | outreach-email | outreach-ig | followups | inbound | report)\n"
-    "/send all email — send all approved emails\n"
-    "/send all instagram — send Instagram DMs to hot leads\n"
-    "/followups — send due follow-ups now\n"
+    "/purge — one-time cleanup: delete the old templated drafts and hand over "
+    "to the research batch (sends nothing)\n"
     "/inbound — scan email for lead replies now\n"
     "/status — latest run report & metrics\n"
+    "/next — confirm the research batch that's waiting and write the next 10 "
+    "businesses (emails are never sent, the owner sends them)\n"
+    "/batch — research batch status: how many ran, what was drafted, and why "
+    "leads were skipped\n"
+    "NOTE: there is no send action. The system never emails or DMs a lead; the "
+    "owner sends the drafts himself. If the user asks to send, explain that and "
+    "offer /next for more drafts.\n"
     "/list drafts — list WARM drafts awaiting approval\n"
     "/approve <id | all> — approve draft(s)\n"
     "/reject <id | all> — reject draft(s)\n"

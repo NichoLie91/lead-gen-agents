@@ -84,6 +84,10 @@ class Atlas:
         self._maps = maps
         self._settings = settings
 
+    def provider_used(self) -> str:
+        """Which Maps action served the last discover() ("" when unknown)."""
+        return getattr(self._maps, "last_provider", "")
+
     async def run(self) -> list[dict]:
         pool = await self._maps.discover()
         pool = dedupe(pool)

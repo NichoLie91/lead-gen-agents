@@ -12,6 +12,10 @@ from src.core.config import Settings
 
 log = logging.getLogger(__name__)
 
+
+class DiscoveryUnavailable(RuntimeError):
+    """Every discovery query failed at the provider -- not an empty market."""
+
 # Business name generator for offline testing. Names are deterministically
 # generated so every (metro, vertical) pair gets its OWN business name — a
 # single name must never repeat across metros, because that would legitimately
@@ -29,15 +33,29 @@ _VERTICAL_TITLES = {
 
 def _business_name(metro_idx: int, vertical: str, taken: set[str]) -> str:
     title = _VERTICAL_TITLES.get(vertical, vertical.title())
-    base = (metro_idx * 7 + list(_VERTICAL_TITLES).index(vertical) * 3)
-    i = 0
-    while True:
+    # Any vertical may appear here (criteria.json is editable), so unknown ones
+    # get a stable hash offset instead of an IndexError. Known verticals keep
+    # their original offsets so existing mock names do not shift.
+    vertical_offset = (list(_VERTICAL_TITLES).index(vertical)
+                       if vertical in _VERTICAL_TITLES
+                       else sum(ord(c) for c in vertical))
+    base = metro_idx * 7 + vertical_offset * 3
+    for i in range(len(_NAME_PREFIXES)):
         prefix = _NAME_PREFIXES[(base + i) % len(_NAME_PREFIXES)]
         name = f"{prefix} {title}"
         if name not in taken:
             taken.add(name)
             return name
-        i += 1
+    # More metros than name prefixes (criteria.json has 24 metros, 20 prefixes):
+    # every prefix is already used for this trade, so add a stable metro suffix.
+    # The old loop retried the same 20 names forever and hung the dry run.
+    for i in range(len(_NAME_PREFIXES)):
+        prefix = _NAME_PREFIXES[(base + i) % len(_NAME_PREFIXES)]
+        name = f"{prefix} {title} {metro_idx + 1}"
+        if name not in taken:
+            taken.add(name)
+            return name
+    raise RuntimeError(f"could not generate a unique mock name for {vertical}")
 
 # Special cases that exercise the exclusion filters (only injected once, so
 # they never trip the in-pool chain rule themselves).
@@ -69,6 +87,18 @@ class MapsAgent:
         self._composio = composio
         self._settings = settings
         self._llm = llm  # Atlas's Gemini brain (optional; None -> template queries)
+        # Which Maps action actually served this run (set by discover()).
+        self.last_provider: str = ""
+
+    # The Composio agent grew a provider failover; older/stub providers used in
+    # tests do not have it, so both helpers degrade instead of raising.
+    def _provider_alive(self) -> bool:
+        check = getattr(self._composio, "has_maps_provider", None)
+        return True if check is None else bool(check())
+
+    def _provider_diagnostics(self) -> str:
+        report = getattr(self._composio, "maps_diagnostics", None)
+        return report() if report else "no provider diagnostics available"
 
     async def _llm_query_shapes(self) -> list[str]:
         """Ask Gemini for up to 2 extra query templates for this run.
@@ -130,6 +160,7 @@ class MapsAgent:
         cap = raw_pool_cap or int(self._settings.crit("raw_pool_cap", 250))
 
         if not self._composio.connected or self._settings.dry_run:
+            self.last_provider = "mock (offline)"
             return self._mock_discover(verticals, metros, cap)
 
         pool: list[dict] = []
@@ -148,6 +179,10 @@ class MapsAgent:
                                   vertical, metro))
             queries = queries[:3] + extra + queries[3:]
         for query, vertical, metro in queries:
+            # Every Maps action this process can see has already failed: stop
+            # rather than burn remaining queries on calls that cannot answer.
+            if not self._provider_alive():
+                break
             results = await self._composio.search_google_maps(query, start=0)
             for item in results:
                 item["vertical"] = vertical
@@ -155,6 +190,19 @@ class MapsAgent:
                 pool.append(item)
             if len(pool) >= cap:
                 break
+        self.last_provider = getattr(self._composio, "maps_provider", lambda: "")()
+        if self.last_provider:
+            log.info("discovery served by %s (%d leads)", self.last_provider, len(pool))
+        if not pool:
+            # A whole run over many (vertical x metro) queries returning nothing
+            # is never a legitimate "no businesses found" result -- it means the
+            # provider refused every call. Raise so the run is marked FAILED and
+            # the owner is alerted, instead of reporting a green "Candidates: 0".
+            raise DiscoveryUnavailable(
+                f"Discovery returned 0 leads from {len(queries)} queries "
+                f"({len(verticals)} verticals x {len(metros)} metros). "
+                f"Provider state: {self._provider_diagnostics()}"
+            )
         return pool[:cap]
 
     # ---------- offline mock ----------
