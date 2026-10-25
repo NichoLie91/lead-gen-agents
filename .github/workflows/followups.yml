@@ -1,12 +1,13 @@
 name: followups
 
-# RETIRED as a sender. The Day 3/7/14 cadence was automated off the old
-# templated first touch, so there is nothing left for it to send. The schedule
-# is off to stop burning a daily run on a no-op; the workflow stays for manual
-# debugging and now only reports what the CRM thinks is due (`followups_due_manual`)
-# without sending anything.
+# RETIRED as a sender, manual-only. The Day 3/7/14 cadence was automated off
+# the old templated first touch, so there is nothing left for it to send; this
+# now only reports what the CRM thinks is due (`followups_due_manual`) and
+# sends nothing. No cron, so it cannot burn a daily run on a no-op. Shares the
+# pipeline concurrency group so it never collides with an inbound run (they
+# all write the same sheets).
 on:
-  workflow_dispatch:           # manual run only; no schedule while retired
+  workflow_dispatch:           # manual run via Actions UI or Telegram /run
 
 concurrency:
   group: pipeline

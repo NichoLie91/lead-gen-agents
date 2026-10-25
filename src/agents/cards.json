@@ -1,0 +1,64 @@
+{
+  "cards": [
+    {
+      "name": "Atlas",
+      "role": "Lead Discovery",
+      "description": "Finds small local businesses via Google Maps (vertical x metro queries), applies exclusion filters, learns from per-query yield feedback.",
+      "capabilities": ["maps_discovery", "exclusion_filters", "query_yield_learning"],
+      "input_schema": {"verticals": "list[str]", "metros": "list[str]", "raw_pool_cap": "int"},
+      "output_schema": {"leads": "list[dict]", "metrics": "candidates:int"},
+      "owns_commands": ["/run", "/status"],
+      "endpoint": "internal://agents/atlas"
+    },
+    {
+      "name": "Scout",
+      "role": "Lead Scoring",
+      "description": "Scores ICP/intent/budget/reachability/timing 0-100 with a deterministic rubric, explains every score, tiers HOT/WARM/NURTURE.",
+      "capabilities": ["score_lead", "scoring_rationale", "bounded_judgment"],
+      "input_schema": {"lead": "dict", "hot": "int", "warm": "int"},
+      "output_schema": {"score": "dict", "rationale": "str"},
+      "owns_commands": ["/status"],
+      "endpoint": "internal://agents/scout"
+    },
+    {
+      "name": "Enrichment",
+      "role": "Contact Research",
+      "description": "Finds + verifies emails and Instagram handles (Hunter -> web search -> agentic decide-next-query loop), never invents data.",
+      "capabilities": ["email_discovery", "instagram_discovery", "email_verification", "agentic_search_loop"],
+      "input_schema": {"leads": "list[dict]"},
+      "output_schema": {"leads": "list[dict]", "flags": "NEEDS_ENRICHMENT|NEEDS_VERIFICATION"},
+      "owns_commands": ["/sheet"],
+      "endpoint": "internal://agents/enrichment"
+    },
+    {
+      "name": "Outreach",
+      "role": "Outreach",
+      "description": "Drafts Gemini-personalized emails/IG DMs with an evaluator-optimizer revise loop, queues WARM drafts for approval, sends approved sends (50/run email cap, 15/24h IG cap, lint-before-send).",
+      "capabilities": ["draft_email", "draft_critique_loop", "ig_dm", "approval_queue"],
+      "input_schema": {"lead": "dict", "action": "draft|send|approve|reject"},
+      "output_schema": {"subject": "str", "body": "str", "score": "int", "status": "str"},
+      "owns_commands": ["/send all email", "/send all instagram", "/approve", "/reject", "/reject all", "/list drafts", "/stop"],
+      "endpoint": "internal://agents/outreach"
+    },
+    {
+      "name": "Followups",
+      "role": "Follow-up Cadence",
+      "description": "Sends Day 3/7/14 follow-ups from the CRM, polishes copy with Gemini.",
+      "capabilities": ["cadence_scheduling", "followup_copy"],
+      "input_schema": {"mode": "followups"},
+      "output_schema": {"metrics": "followups_sent:int|followups_due:int"},
+      "owns_commands": ["/followups", "/stop"],
+      "endpoint": "internal://agents/followups"
+    },
+    {
+      "name": "Inbound",
+      "role": "Inbound Replies",
+      "description": "Scans email for lead replies, triages with a bounded classify-act-escalate loop (keyword STOP floor, CRM-history tool), escalates to the owner.",
+      "capabilities": ["reply_classification", "crm_history_lookup", "owner_escalation", "auto_opt_out"],
+      "input_schema": {"mode": "inbound"},
+      "output_schema": {"metrics": "inbound_processed:int|inbound_owner_notified:int"},
+      "owns_commands": ["/inbound"],
+      "endpoint": "internal://agents/inbound"
+    }
+  ]
+}

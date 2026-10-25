@@ -104,9 +104,9 @@ only repo writer.
 | Workflow | Cadence | What it does |
 |---|---|---|
 | `bot-poll.yml` | every 5 min (cron) + self-keep-alive | Long-polls `getUpdates` up to `POLL_MAX_WAIT_SEC` (300s) per run, dispatches commands via the Lead Agent brain, persists the offset, commits state, then re-dispatches the next poll (`POLL_KEEPALIVE=1`) because GitHub throttles the cron to 30–150 min gaps. Never overlaps itself. |
-| `pipeline.yml` | daily 15:00 UTC (22:00 WIB) + manual `/run` | Runs pipeline stages by `mode` input: `full` (default) / `discovery` / `enrichment` / `outreach-email` / `outreach-ig` / `followups` / `inbound` / `report`. |
-| `followups.yml` | daily 08:00 UTC | `--mode followups` — sends due follow-ups. Shares the `pipeline` concurrency group. |
-| `inbound.yml` | every 2 h | `--mode inbound` — scans email for lead replies. Shares the `pipeline` concurrency group. |
+| `pipeline.yml` | daily 15:00 UTC (22:00 WIB), **discovery mode** + manual `/run` | Scheduled runs: discovery + enrichment + scoring ONLY — no email drafts, no sends. Manual `/run` accepts any `mode`: `full` / `discovery` / `enrichment` / `outreach-email` / `outreach-ig` / `followups` / `inbound` / `report`. |
+| `followups.yml` | manual only | `--mode followups` — sends due follow-ups via `workflow_dispatch` or Telegram `/run followups` (daily cron removed). Shares the `pipeline` concurrency group. |
+| `inbound.yml` | manual only | `--mode inbound` — scans email for lead replies via `workflow_dispatch` or Telegram `/inbound` (2-hourly cron removed). Shares the `pipeline` concurrency group. |
 | `ci.yml` | push/PR | ruff + pytest + a PII-commit guard (fails if emails appear in committed state). |
 
 **Concurrency rules:** polls serialize against each other (`bot-poll` group); pipeline runs

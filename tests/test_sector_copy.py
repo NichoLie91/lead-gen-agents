@@ -63,10 +63,19 @@ def test_unknown_vertical_refuses_to_draft():
         draft({"name": "Mystery Co", "vertical": ""})
 
 
-def test_every_configured_vertical_maps_to_a_sector():
-    """Discovery must never produce a lead the copy layer cannot draft."""
+def test_a_configured_vertical_is_either_routed_or_openly_refused():
+    """Discovery can now surface trades outside the three sectors (criteria.json
+    lists electricians, roofers, movers...). The contract is not "everything
+    maps" — it is "nothing falls back silently": either a sector, or an explicit
+    UnsupportedSector refusal."""
     for vertical in CRITERIA["verticals"]:
-        assert sector_of(vertical) in SECTORS, vertical
+        sector = sector_of(vertical)
+        if sector is None:
+            with pytest.raises(UnsupportedSector):
+                draft({"name": "Example Co", "vertical": vertical})
+            continue
+        assert sector in SECTORS, vertical
+        draft({"name": "Example Co", "vertical": vertical})  # must not raise
 
 
 # ---------- variation ----------
@@ -120,6 +129,7 @@ class _NoLLM:
 def _pipeline() -> Pipeline:
     pipe = Pipeline.__new__(Pipeline)
     pipe.llm = _NoLLM()
+    pipe.state = None  # memory_block(None, ...) is a no-op
     return pipe
 
 

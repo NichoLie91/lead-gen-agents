@@ -101,9 +101,14 @@ ruff check src tests
   dispatches commands, persists the offset, commits state, then re-dispatches
   the next poll (`POLL_KEEPALIVE=1`) because GitHub throttles the cron to
   gaps of 30–150 min on low-activity repos.
-- `.github/workflows/pipeline.yml` — daily at 15:00 UTC (22:00 WIB) + manual
-  `workflow_dispatch` with a `mode` input (full / discovery / enrichment /
-  outreach-email / outreach-ig / report).
+- `.github/workflows/pipeline.yml` — daily at 15:00 UTC (22:00 WIB), running
+  **discovery only** (find + enrich + score leads; NO email drafts, NO sends).
+  Email outreach (`outreach-email` / `outreach-ig`) is manual-only via
+  `workflow_dispatch` or Telegram `/run`.
+- `.github/workflows/followups.yml` / `inbound.yml` — manual-only
+  (`workflow_dispatch` / Telegram `/followups` and `/inbound`); their daily and
+  2-hourly crons were removed, so nothing emails or reads the inbox on a
+  schedule.
 - `.github/workflows/ci.yml` — ruff + pytest + PII-commit check on push/PR.
 
 See `lead-gen-agents-spec.md` (in the project folder) for the full

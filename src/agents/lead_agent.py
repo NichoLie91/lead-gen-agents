@@ -78,7 +78,16 @@ COMMAND_OWNERS = {
 
 
 def team_roster() -> str:
-    """PII-safe one-liner describing the six agents (fed to Gemini)."""
+    """PII-safe roster of the six agents (fed to Gemini).
+
+    Phase 4: rendered from src/agents/cards.json (A2A agent cards) so the
+    team is DISCOVERED, not hardcoded; the TEAM tuple stays as the offline
+    fallback when the cards file is unreadable."""
+    from src.agents.discovery import discover_team
+
+    rendered = discover_team()
+    if rendered:
+        return rendered
     return "\n".join(
         f"- {m['name']} ({m['role']}): {m['capabilities']}" for m in TEAM
     )
@@ -371,6 +380,29 @@ class LeadAgent:
             return await self.delegate(command, args, user_id)
         return await self._handle_free_text(text, user_id)
 
+    async def run_peer_task(self, task) -> str:
+        """A2A-shaped peer-to-peer entry point (Phase 4).
+
+        Any agent (or future external caller) can hand the Lead Agent an
+        AgentTask; it routes through the same bounded agentic loop used for
+        owner requests and answers with status + message. Never raises.
+        """
+        from src.agents.discovery import dispatch_task
+
+        async def _handler(t):
+            answer = await self._execute_agent_task(
+                f"{t.kind}: {t.payload.get('detail', '')}".strip(),
+                t.payload)
+            return {"ok": True, "message": answer}
+
+        try:
+            done = await dispatch_task(task, handler=_handler)
+            if done.status == "completed":
+                return done.message or "task completed"
+            return f"task {done.task_id} {done.status}: {done.message}"
+        except Exception as exc:
+            return f"peer task failed: {exc!r}"
+
     async def _handle_free_text(self, text: str, user_id: int = 0) -> str:
         if not self.llm.available:
             return ("I only understand the listed /commands right now (no Gemini "
@@ -393,10 +425,32 @@ class LeadAgent:
     async def _execute_agent_task(self, task: str, params: dict) -> str:
         """Execute a custom agent task that Gemini decided needs doing.
 
-        This is the bridge between Gemini's intent brain and the six-agent
-        team. Gemini describes what needs to happen; we route it to the
-        right agent(s) and return the result.
+        Phase 1 (RESEARCH_PROPER_AGENTS.md): the request first runs through a
+        bounded agentic loop — the brain declares a plan, calls real tools
+        (status, drafts, triggers, CRM lookups), observes results, and answers
+        with a trace. The deterministic keyword router below stays as the
+        fallback (no brain / loop failure), so behavior never regresses.
         """
+        try:
+            from src.agents.lead_agent_tools import run_lead_agent_task
+
+            task_full = task if not params else f"{task} (details: {params})"
+            result = await run_lead_agent_task(
+                role="Lead Agent", task=task_full, state=self.state,
+                approvals=self.approvals, github=self.github,
+                settings=self.settings, brain=self.llm,
+            )
+            if result.stopped not in ("no_brain", "error"):
+                answer = result.answer or "(no answer produced)"
+                if result.stopped == "max_steps":
+                    answer += "\n\n(step budget hit — partial work above)"
+                if result.steps:  # transparency: show the work (principle 2)
+                    answer += "\n\nTrace:\n" + result.trace
+                return answer
+            # no_brain / error -> deterministic routing below
+        except Exception as exc:
+            log.warning("agentic loop failed (%s); using deterministic routing", exc)
+
         task_lower = task.lower()
 
         # Check if this is a filtering/scoring request first (score filters

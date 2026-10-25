@@ -2,16 +2,18 @@
   "verticals": [
     "plumber", "drain cleaning", "water heater", "sewer repair",
     "hvac", "ac repair", "heating repair", "air conditioning",
-    "dental", "dental clinic", "cosmetic dentistry", "pediatric dentistry",
-    "dental implants", "orthodontics"
+    "cleaning", "house cleaning", "commercial cleaning", "mechanic", "auto repair", "auto body",
+    "dental", "dental clinic", "dentist", "orthodontist", "cosmetic dentist",
+    "cosmetic dentistry", "pediatric dentistry", "dental implants", "orthodontics",
+    "electrician", "locksmith", "roofer", "pest control", "landscaper", "tree service",
+    "painter", "flooring", "pool service", "appliance repair", "chiropractor", "physical therapy", "veterinarian",
+    "storage unit", "moving company"
   ],
   "metros": [
     "Houston", "Dallas", "Fort Worth", "San Antonio", "Austin",
-    "Tampa", "Orlando", "Jacksonville", "Miami",
-    "Phoenix", "Las Vegas",
-    "Atlanta", "Charlotte", "Nashville", "Memphis",
-    "Indianapolis", "Columbus", "Oklahoma City",
-    "Denver", "El Paso",
+    "Tampa", "Orlando", "Jacksonville", "Miami", "Phoenix",
+    "Las Vegas", "Atlanta", "Charlotte", "Nashville", "Memphis",
+    "Indianapolis", "Columbus", "Oklahoma City", "Denver", "El Paso",
     "San Francisco", "Seattle", "Portland", "Boston"
   ],
   "rating_min": 4.0,
@@ -24,7 +26,7 @@
   "hot_threshold": 90,
   "warm_threshold": 70,
   "emails_per_run_max": 50,
-  "ig_dms_per_24h_max": 15,
+  "igdms_per_24h_max": 15,
   "query_shape": "{vertical} in {city} website email phone",
   "sender": {
     "name": "Nicholas",
