@@ -218,6 +218,9 @@ async def classify_intent(llm, user_text: str, context: str = "",
     try:
         raw = await asyncio.wait_for(llm.complete(prompt), INTENT_TIMEOUT_SEC)
     except TimeoutError:
+        # No retry after a timeout: the ceiling is for the whole reply, so a
+        # second 60s attempt would leave the user waiting two minutes for a
+        # "busy" message.
         log.warning("intent classification timed out; answering 'busy'")
         return {"action": "unavailable"}
     if not raw:  # transient API hiccup -> one quick retry

@@ -375,10 +375,16 @@ def test_a_stalled_brain_answers_busy_instead_of_going_quiet(monkeypatch):
     class Stalled:
         available = True
 
+        def __init__(self):
+            self.calls = 0
+
         async def complete(self, prompt, **kwargs):
+            self.calls += 1
             await _asyncio.sleep(10)
             return ""
 
     monkeypatch.setattr(ai, "INTENT_TIMEOUT_SEC", 0.02)
-    intent = _asyncio.run(ai.classify_intent(Stalled(), "find plumber leads", ""))
+    stalled = Stalled()
+    intent = _asyncio.run(ai.classify_intent(stalled, "find plumber leads", ""))
     assert intent == {"action": "unavailable"}
+    assert stalled.calls == 1, "a timeout is not retried; it is the deadline"
