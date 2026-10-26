@@ -27,7 +27,7 @@
   "warm_threshold": 70,
   "emails_per_run_max": 50,
   "igdms_per_24h_max": 15,
-  "query_shape": "{vertical} in {city} website email phone",
+  "query_shape": "{vertical} in {city}",
   "sender": {
     "name": "Nicholas",
     "business_name": "",

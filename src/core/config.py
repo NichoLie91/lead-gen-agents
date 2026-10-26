@@ -72,6 +72,12 @@ class Settings:
     # removed from the v3 catalog 2026-08; Tavily extract fetches lead websites
     # for email discovery). Optional — enrichment degrades gracefully without it.
     tavily_api_key: str = ""
+    # Serper.dev API key: the Google Maps places endpoint, called DIRECTLY over
+    # HTTP rather than through Composio. 2,500 free queries on signup, ~20
+    # results each, so this is the cheapest provider that still returns the
+    # rating/review fields the target gate needs. Optional -- when absent the
+    # Maps failover chain is exactly the Composio one.
+    serper_api_key: str = ""
     # Hunter.io API key for email finding (Domain Search) and verification.
     # Free tier: 25 searches + 50 verifications/month. When set, Hunter is
     # used as the primary email finder (replaces Tavily web scraping for
@@ -112,6 +118,7 @@ class Settings:
             zerobounce_api_key=env.get("ZEROBOUNCE_API_KEY", ""),
             tavily_api_key=env.get("TAVILY_API_KEY", ""),
             hunter_api_key=env.get("HUNTER_API_KEY", ""),
+            serper_api_key=env.get("SERPER_API_KEY", ""),
             gh_pat=env.get("GH_PAT", ""),
             google_sheet_id=env.get("GOOGLE_SHEET_ID", ""),
             telegram_alert_chat_id=env.get("TELEGRAM_ALERT_CHAT_ID", ""),

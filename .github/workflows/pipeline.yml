@@ -66,6 +66,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}  # direct Maps places provider (2,500 free queries)
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}  # direct web-extract fallback for email enrichment
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}  # Hunter.io email finder + verifier
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

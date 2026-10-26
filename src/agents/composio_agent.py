@@ -30,6 +30,12 @@ log = logging.getLogger(__name__)
 V3_BASE = "https://backend.composio.dev/api/v3"
 EXECUTE_TIMEOUT = 90.0
 
+# Direct (non-Composio) Maps provider: Serper's Google Maps places endpoint.
+# Pseudo-slug so it can sit in the same failover chain as the Composio actions.
+SERPER_PLACES = "SERPER_PLACES_SEARCH"
+SERPER_URL = "https://google.serper.dev/places"
+SERPER_TIMEOUT = 30.0
+
 # Retry/backoff on throttles (spec 7.x): Composio surfaces Google API quota
 # errors as HTTP 429 / 5xx, transport failures, or a ``successful: false`` body
 # whose message mentions quota/rate limits. We sleep 2-5s first, then back off
@@ -370,8 +376,16 @@ class ComposioAgent:
 
     # ---------- higher-level tools ----------
     def _maps_attempt_order(self) -> list[str]:
-        """Maps candidates, the proven winner first."""
+        """Maps candidates, the proven winner first.
+
+        A configured SERPER_API_KEY goes to the FRONT: it is a direct HTTP call
+        that needs no Composio connection, so it can answer even when the
+        toolkit is admin-disabled (the 2026-10-24 403) or no serpapi/zenserp
+        account exists.
+        """
         cands = self._candidates("maps_search")
+        if self.settings.serper_api_key and SERPER_PLACES not in cands:
+            cands = [SERPER_PLACES] + cands
         if self._maps_winner:
             cands = [self._maps_winner] + [c for c in cands if c != self._maps_winner]
         return cands
@@ -393,6 +407,52 @@ class ComposioAgent:
             }
         return {"q": query}
 
+    async def _maps_call(self, slug: str, query: str) -> dict:
+        """Run one Maps provider -> {ok, data|error}.
+
+        Keeps the failover loop provider-agnostic: the direct Serper call and a
+        Composio action return the same shape.
+        """
+        if slug == SERPER_PLACES:
+            return await self._serper_places(query)
+        return await self.execute_action(slug, self._maps_params(slug, query))
+
+    async def _serper_places(self, query: str) -> dict:
+        """POST google.serper.dev/places -> {ok, data}.
+
+        2,500 free queries, ~20 places each, including phoneNumber/website/
+        rating/ratingCount -- everything Atlas's gates read. One retry on
+        throttle/5xx, matching the Composio path's behaviour.
+        """
+        body = {"q": query, "gl": "us", "hl": "en", "num": 20}
+        headers = {"X-API-KEY": self.settings.serper_api_key,
+                   "Content-Type": "application/json"}
+        last = "unreachable"
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=SERPER_TIMEOUT) as client:
+                    resp = await client.post(SERPER_URL, json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                last = str(exc)
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                    continue
+                return {"ok": False, "action": SERPER_PLACES, "error": last}
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                await asyncio.sleep(2.0)
+                continue
+            if resp.status_code != 200:
+                # 401/403 here means a bad key or an exhausted free balance: a
+                # permanent failure for this run, so the chain moves on.
+                return {"ok": False, "action": SERPER_PLACES,
+                        "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                return {"ok": False, "action": SERPER_PLACES,
+                        "error": f"unexpected body: {str(payload)[:160]}"}
+            return {"ok": True, "action": SERPER_PLACES, "data": payload}
+        return {"ok": False, "action": SERPER_PLACES, "error": last}
+
     async def search_google_maps(self, query: str, start: int = 0) -> list[dict]:
         """Local business listings, failing over across every Maps action.
 
@@ -405,7 +465,7 @@ class ComposioAgent:
         for slug in self._maps_attempt_order():
             if slug in self._maps_failures:
                 continue
-            resp = await self.execute_action(slug, self._maps_params(slug, query))
+            resp = await self._maps_call(slug, query)
             if not resp.get("ok"):
                 # Never swallow this silently: a disabled toolkit looks exactly
                 # like "no businesses in this metro" at the end of the run.
@@ -451,23 +511,27 @@ class ComposioAgent:
             state = ""
             if address:
                 parts = [p.strip() for p in address.split(",")]
-                # Canadian provinces are 2-letter codes; US states too
+                # Canadian provinces and US states are 2-letter codes, but real
+                # Google addresses put the ZIP in the same segment
+                # ("... Houston, TX 77002, USA"), so match the FIRST TOKEN of a
+                # segment rather than requiring the whole segment to be 2 chars
+                # (which silently returned '' for every US address).
                 for part in parts:
-                    part_upper = part.upper().strip()
-                    if len(part_upper) == 2 and part_upper.isalpha():
-                        state = part_upper
+                    tokens = part.split()
+                    if tokens and len(tokens[0]) == 2 and tokens[0].isalpha():
+                        state = tokens[0].upper()
                         break
             out.append({
                 "name": name,
                 "address": address,
                 "phone": item.get("nationalPhoneNumber") or item.get("formatted_phone_number")
-                         or item.get("phone", ""),
+                         or item.get("phoneNumber") or item.get("phone", ""),
                 "website": item.get("websiteUri") or item.get("website") or item.get("website_url", ""),
                 "rating": item.get("rating"),
                 "reviews": item.get("userRatingCount") or item.get("user_ratings_total")
-                           or item.get("reviews"),
+                           or item.get("ratingCount") or item.get("reviews"),
                 "open_state": item.get("businessStatus") or item.get("business_status")
-                              or item.get("open_state", ""),
+                              or item.get("openState") or item.get("open_state", ""),
                 "state": state,
                 "source_url": item.get("googleMapsUri") or item.get("place_id") or "",
                 "source_evidence_text": f"Google Maps listing: {name} in {address[:80]}",
