@@ -8,6 +8,7 @@ on, so it goes to the front of the chain when SERPER_API_KEY is set.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -43,8 +44,8 @@ class _Resp:
 class _FakeClient:
     """Records each POST and answers from a queue of (status, payload)."""
 
-    calls: list[dict] = []
-    queue: list[tuple[int, dict]] = []
+    calls: ClassVar[list[dict]] = []
+    queue: ClassVar[list[tuple[int, dict]]] = []
 
     def __init__(self, *args, **kwargs):
         pass

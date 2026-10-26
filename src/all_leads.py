@@ -124,15 +124,18 @@ def merge_rows(rows: list[dict]) -> list[dict]:
         if not name:
             continue  # a row with no business name identifies nothing
         keys = match_keys(row)
-        hit = None
-        if keys:
+        # A row with no city cannot be located, so its name is the only thing
+        # that can identify it (this is how Outreach/CRM rows arrive, sometimes
+        # with two different emails for one shop). Same name + no city = same
+        # business; same name in two KNOWN cities stays separate.
+        weak = f"w:{name}" if not str(row.get("city") or "").strip() else ""
+        hit = index.get(weak) if weak else None
+        if hit is None:
             hit = next((index[k] for k in keys if k in index), None)
-        else:
-            hit = index.get(f"w:{name}")
-            if hit is None:
-                candidates = by_name.get(name) or set()
-                if len(candidates) == 1:
-                    hit = next(iter(candidates))
+        if hit is None and not keys:
+            candidates = by_name.get(name) or set()
+            if len(candidates) == 1:
+                hit = next(iter(candidates))
         if hit is None:
             out.append(row)
             pos = len(out) - 1
@@ -141,8 +144,8 @@ def merge_rows(rows: list[dict]) -> list[dict]:
             pos = hit
         for key in keys:
             index.setdefault(key, pos)
-        if not keys:
-            index.setdefault(f"w:{name}", pos)
+        if weak:
+            index.setdefault(weak, pos)
         by_name[name].add(pos)
     return out
 

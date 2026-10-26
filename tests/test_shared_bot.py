@@ -10,8 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
-
 from src.agents.lead_agent import LeadAgent
 from src.bot.commands import GUEST_COMMANDS, denied_message, is_allowed, role_for
 from src.bot.telegram_bot import handle_update

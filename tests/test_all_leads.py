@@ -71,6 +71,13 @@ def test_name_only_rows_collapse_into_one():
     assert len(merge_rows(rows)) == 1
 
 
+def test_same_name_with_two_emails_and_no_city_is_one_lead():
+    """Live Outreach data: one shop, two contact addresses, no city column."""
+    rows = [_row(business_name="Cooper Plumbing", email="a@cooper.test"),
+            _row(business_name="Cooper Plumbing", email="b@cooper.test")]
+    assert len(merge_rows(rows)) == 1
+
+
 def test_a_name_only_row_joins_the_single_city_row():
     rows = [_row(business_name="Blue Creek Plumbing", city="Houston",
                  public_phone="(713) 555-0100"),
