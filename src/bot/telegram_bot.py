@@ -19,7 +19,7 @@ import httpx
 
 from src.agents.github_agent import GitHubAgent
 from src.agents.lead_agent import LeadAgent
-from src.bot.commands import is_allowed
+from src.bot.commands import denied_message, role_for
 from src.core.config import Settings
 from src.core.llm import GeminiClient, GeminiPool, LLMUsage
 from src.core.state import StateStore
@@ -175,15 +175,32 @@ async def handle_update(
     message = update.get("message") or {}
     chat_id = message.get("chat", {}).get("id")
     user_id = message.get("from", {}).get("id")
-    text = message.get("text", "")
+    text = (message.get("text") or "").strip()
     if chat_id is None or user_id is None:
         return
-    if not is_allowed(user_id, settings.admin_telegram_ids):
-        log.info("ignoring message from unauthorized user %s", user_id)
+
+    role = role_for(user_id, settings.admin_telegram_ids,
+                    settings.guest_telegram_ids)
+    if role == "blocked":
+        # Never answer with silence: a shared bot that ignores strangers looks
+        # broken to the person the owner just invited. Tell them their ID so
+        # the owner can add it to GUEST_TELEGRAM_IDS in one copy-paste.
+        log.info("unauthorized user %s asked for access", user_id)
+        await send_message(settings.telegram_bot_token, chat_id,
+                           denied_message(user_id))
+        return
+
+    if not text:
+        # Photos, stickers, voice notes: previously this fell through to the
+        # Gemini brain with an EMPTY prompt (a wasted LLM call and a nonsense
+        # reply). Say what the bot can read instead.
+        await send_message(settings.telegram_bot_token, chat_id,
+                           "I can only read text messages. Type a command like "
+                           "/status, or describe the task in a sentence.")
         return
 
     lead = _make_lead(settings, state, github, llm=_pro_brain(settings))
-    reply = await lead.handle_message(text, user_id)
+    reply = await lead.handle_message(text, user_id, role=role)
     await send_message(settings.telegram_bot_token, chat_id, reply)
 
 
@@ -261,6 +278,9 @@ async def main() -> int:
             "ADMIN_TELEGRAM_IDS is empty: the bot is OPEN, any chat with the "
             "link can send commands (use /id to fetch your user ID)"
         )
+    elif settings.guest_telegram_ids:
+        log.info("sharing enabled: %d guest(s) have read-only access",
+                 len(settings.guest_telegram_ids))
     state = StateStore(settings.state_dir)
     github = GitHubAgent(settings, state)
     # Keep-alive FIRST: queue the next poll run before we long-poll, so even a

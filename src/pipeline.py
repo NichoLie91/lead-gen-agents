@@ -318,6 +318,11 @@ class Pipeline:
             # batched, throttles retried with backoff in execute_action).
             if mode != "report":
                 await self.crm.save()
+            # ONE master list, rebuilt from every tab + this run's leads. Runs
+            # after the CRM is queued so its statuses are visible, and before
+            # flush() so it lands in the same batched write burst.
+            if mode != "report":
+                await self._stage_write_all_leads(scored, report)
             if mode != "report" and self.sheets.has_pending_writes():
                 ok_tabs, failed_tabs = await self.sheets.flush()
                 report["metrics"]["sheet_tabs_written"] = ok_tabs
@@ -577,6 +582,7 @@ class Pipeline:
                 lead.get("state", ""),  # state
                 lead.get("vertical", ""),  # trade
                 lead.get("phone", ""),  # phone
+                lead.get("owner_phone", "") or "",  # owner_or_manager_phone
                 lead.get("website", "") or "",  # official_site
                 lead.get("rating", "") or "",  # rating
                 lead.get("reviews", "") or "",  # review_count
@@ -649,6 +655,29 @@ class Pipeline:
         for i, row in enumerate(rows, start=1):
             row[0] = i  # rank reflects the queue order, not the old run
         return rows
+
+    async def _stage_write_all_leads(self, leads: list[dict], report: dict) -> None:
+        """Write the single deduped master list (AllLeads tab).
+
+        Every tab contributes; the same business appears once no matter how
+        many runs, tabs or verticals reached it, and the row keeps both phone
+        numbers. Failures are reported, never swallowed: an empty master list
+        must never look like "no leads yet".
+        """
+        from src.all_leads import build_all_leads, to_rows
+
+        try:
+            rows = await build_all_leads(self.sheets, leads)
+        except Exception as exc:
+            log.warning("all-leads build failed: %s", exc)
+            report["metrics"]["all_leads_error"] = str(exc)[:200]
+            return
+        await self.sheets.write_tab("AllLeads", to_rows(rows))
+        report["metrics"]["all_leads"] = len(rows)
+        report["metrics"]["all_leads_with_email"] = sum(
+            1 for r in rows if str(r.get("email") or "").strip())
+        report["metrics"]["all_leads_with_owner_phone"] = sum(
+            1 for r in rows if str(r.get("owner_or_manager_phone") or "").strip())
 
     # ---------- daily research batch (detective -> writer -> closer) ----------
     async def _load_pipeline_leads(self) -> list[dict]:

@@ -39,6 +39,44 @@ BLOCKLIST_DOMAINS = {
 
 IG_RE = re.compile(r"^@?[A-Za-z0-9._]{1,30}$")
 
+# US-style phone numbers in page text. Deliberately loose: sites print
+# (713) 555-0100, 713.555.0100, 713-555-0100 and +1 713 555 0100.
+PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)"
+)
+# Words that mark a number as a person's line rather than the shop's front desk.
+OWNER_PHONE_HINTS = (
+    "owner", "manager", "direct line", "mobile", "cell", "call or text",
+    "text me", "text us", "my number", "personal number",
+)
+
+
+def _phone_digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")[-10:]
+
+
+def find_owner_phone(text: str, public_phone: str = "") -> str:
+    """Best-effort OWNER/MANAGER phone from page text ("" when unsure).
+
+    Only returns a number that is (a) different from the shop's public Maps
+    number and (b) near owner/manager/mobile wording. Anything else is left
+    blank on purpose: a wrong "owner's mobile" in a sheet is worse than no
+    number at all, and this list is used to call people.
+    """
+    if not text:
+        return ""
+    public = _phone_digits(public_phone)
+    lowered = text.lower()
+    for match in PHONE_RE.finditer(text):
+        candidate = match.group(0).strip()
+        digits = _phone_digits(candidate)
+        if len(digits) != 10 or digits == public:
+            continue
+        context = lowered[max(0, match.start() - 80):match.end() + 80]
+        if any(hint in context for hint in OWNER_PHONE_HINTS):
+            return candidate
+    return ""
+
 
 def normalize_email(raw: str | None) -> str | None:
     """Return a normalized valid email or None."""
@@ -112,6 +150,11 @@ async def enrich_leads(
             if lead.get("website") and not lead.get("_mock"):
                 lead["_chatbot"] = await _has_chatbot(composio, lead["website"])
                 lead["_agency_built"] = await _has_agency_marker(composio, lead["website"])
+                # Owner/manager line: same (cached) page fetch, so this costs
+                # no extra request per lead. Blank when the page does not name
+                # one next to a person-specific number.
+                html = await composio.fetch_url(lead["website"])
+                lead["owner_phone"] = find_owner_phone(html, lead.get("phone", ""))
 
         # Verify email via Hunter.io (primary) or SMTP probe (fallback).
         verify_key = settings.hunter_api_key or settings.zerobounce_api_key

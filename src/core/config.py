@@ -86,6 +86,10 @@ class Settings:
     gh_pat: str = ""
     google_sheet_id: str = ""
     admin_telegram_ids: list[int] = field(default_factory=list)
+    # Users the bot is SHARED with. They get read-only access (status, drafts,
+    # sheet, questions) but cannot trigger runs, approve/reject, stop, or spend
+    # discovery credits. Empty + empty admins means the old "open bot" mode.
+    guest_telegram_ids: list[int] = field(default_factory=list)
     telegram_alert_chat_id: str = ""
     # --- knobs ---
     poll_max_wait_sec: float = 300.0
@@ -129,9 +133,24 @@ class Settings:
             dry_run=env.get("DRY_RUN", "") in ("1", "true", "True"),
         )
         raw_admin = env.get("ADMIN_TELEGRAM_IDS", "")
-        settings.admin_telegram_ids = [int(x) for x in raw_admin.split(",") if x.strip()]
+        settings.admin_telegram_ids = cls._parse_ids(raw_admin)
+        settings.guest_telegram_ids = cls._parse_ids(env.get("GUEST_TELEGRAM_IDS", ""))
         settings.criteria = cls._load_criteria(settings.repo_root / "config" / "criteria.json")
         return settings
+
+    @staticmethod
+    def _parse_ids(raw: str) -> list[int]:
+        """Comma-separated id list; junk entries are dropped, not fatal."""
+        ids: list[int] = []
+        for chunk in (raw or "").split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                ids.append(int(chunk))
+            except ValueError:
+                continue
+        return ids
 
     @staticmethod
     def _load_criteria(path: Path) -> dict:

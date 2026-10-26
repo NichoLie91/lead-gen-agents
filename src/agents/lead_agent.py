@@ -31,7 +31,7 @@ import logging
 from src.agents.github_agent import GitHubAgent
 from src.approvals import ApprovalQueue
 from src.bot.ai import RUN_MODES, classify_intent
-from src.bot.commands import build_help, format_status, parse_command
+from src.bot.commands import GUEST_COMMANDS, build_help, format_status, parse_command
 from src.core.config import Settings
 from src.core.llm import GeminiClient, GeminiKeyState, GeminiPool, LLMUsage
 from src.core.state import StateStore
@@ -371,14 +371,30 @@ class LeadAgent:
         return "\n".join(lines)
 
     # ---------- conversation entry point (owns EVERY reply) ----------
-    async def handle_message(self, text: str, user_id: int) -> str:
+    async def handle_message(self, text: str, user_id: int,
+                             role: str = "owner") -> str:
         """Exact slash commands take the deterministic fast path; everything
         else (plain English, questions, unknown /commands) goes through the
-        Gemini brain — both routed here, through this single agent."""
+        Gemini brain — both routed here, through this single agent.
+
+        ``role`` is "owner" (full control) or "guest" (read-only). A guest can
+        still ask questions and read status, but nothing that spends credits,
+        writes the owner's sheet, approves drafts or triggers a run.
+        """
         command, args = parse_command(text)
         if command:
+            if role == "guest" and command not in GUEST_COMMANDS:
+                return self._guest_refusal(command)
             return await self.delegate(command, args, user_id)
-        return await self._handle_free_text(text, user_id)
+        return await self._handle_free_text(text, user_id, role=role)
+
+    @staticmethod
+    def _guest_refusal(command: str) -> str:
+        return (
+            f"🔒 {command} is owner-only.\n\n"
+            "As a guest you can use: " + ", ".join(sorted(GUEST_COMMANDS)) +
+            ".\nAsk the owner to run it, or to give you owner access."
+        )
 
     async def run_peer_task(self, task) -> str:
         """A2A-shaped peer-to-peer entry point (Phase 4).
@@ -403,10 +419,14 @@ class LeadAgent:
         except Exception as exc:
             return f"peer task failed: {exc!r}"
 
-    async def _handle_free_text(self, text: str, user_id: int = 0) -> str:
+    async def _handle_free_text(self, text: str, user_id: int = 0,
+                                role: str = "owner") -> str:
         if not self.llm.available:
             return ("I only understand the listed /commands right now (no Gemini "
                     "key configured) — send /help to see them.")
+        # A guest's plain English is answered as a QUESTION only: any intent that
+        # would trigger a run or agent work is refused before it executes, so a
+        # shared bot can never spend the owner's credits or touch the sheet.
         intent = await classify_intent(self.llm, text, self._intent_context())
         if intent.get("action") == "unavailable":
             return ("⚠️ Gemini is busy right now (temporary API hiccup). "
@@ -415,6 +435,13 @@ class LeadAgent:
             return ("I couldn't map that to an action. Send /help, or rephrase — "
                     "e.g. \"run the pipeline\", \"approve all drafts\", "
                     "\"how did the last run go?\"")
+        if role == "guest":
+            if intent.get("action") == "command":
+                return self._guest_refusal(intent["command"])
+            if intent.get("action") == "agent":
+                return ("🔒 That needs owner access — it would run the pipeline or "
+                        "write to the owner's sheet.\n\nAsk the owner to run it.")
+            return intent.get("text") or "👍"
         if intent.get("action") == "command":
             return await self.delegate(intent["command"], intent.get("args", ""), user_id)
         if intent.get("action") == "agent":

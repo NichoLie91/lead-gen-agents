@@ -364,10 +364,10 @@ Repo variables (override via `gh variable set`): `GEMINI_MODEL`, `GEMINI_MODEL_F
 `GEMINI_MODEL_PRO` (all default `gemini-flash-latest`).
 
 **Composio connections:** `googlesheets` + `gmail` REQUIRED (ACTIVE for the user's Google
-account); `instagram` optional (Meta Business account); `tavily` optional (web-search
-enrichment — without it email extraction degrades to NEEDS_ENRICHMENT). Pre-flight:
+account); `tavily` optional (web-search enrichment — without it email extraction degrades
+to NEEDS_ENRICHMENT). NO Instagram account is required: the DM stage is retired. Pre-flight:
 `python -m src.preflight`; mint OAuth links with `python -m src.preflight --connect gmail
-googlesheets instagram`.
+googlesheets`.
 
 **Config:** `config/criteria.json` — verticals, metros, caps, thresholds, query shape.
 `rating_min: 4.4`, `reviews_min: 5`, `reviews_max: 2000`, `raw_pool_cap: 250`,
@@ -387,7 +387,7 @@ python -m src.bot.telegram_bot
 
 # Composio connection pre-flight:
 COMPOSIO_API_KEY=<key> python -m src.preflight
-COMPOSIO_API_KEY=<key> python -m src.preflight --connect gmail googlesheets instagram
+COMPOSIO_API_KEY=<key> python -m src.preflight --connect gmail googlesheets
 
 # tests + lint:
 pytest

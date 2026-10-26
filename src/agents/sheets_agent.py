@@ -33,16 +33,28 @@ from src.core.state import StateStore
 log = logging.getLogger(__name__)
 
 TABS = ("Pipeline", "Score", "Outreach", "Drafts", "Followup", "CRM",
-        "DraftsArchive")
+        "DraftsArchive", "AllLeads")
 
 SCORING_SUMMARY_HEADER = ["Metric", "Value"]
 
 PIPELINE_HEADER = [
     "rank", "business_name", "verified_email", "email_verification_method",
-    "city", "state", "trade", "phone", "official_site", "rating",
+    "city", "state", "trade", "phone", "owner_or_manager_phone",
+    "official_site", "rating",
     "review_count", "instagram_profile", "booking_signal", "emergency_signal",
     "source_url", "source_evidence_text", "evidence_quality",
     "scout_score", "scout_tier", "recommended_channel", "hold_reason",
+]
+
+# ONE master list: every lead this system has ever found, from every tab,
+# with both phone numbers, the email and the score. Deduped by phone, email
+# then name+city, and accumulated across runs (never rewritten with only the
+# current run's leads).
+ALL_LEADS_HEADER = [
+    "lead_id", "business_name", "trade", "city", "state",
+    "public_phone", "owner_or_manager_phone", "email", "email_status",
+    "website", "rating", "review_count", "scout_score", "scout_tier",
+    "sales_status", "sources", "first_seen", "last_seen",
 ]
 SCORE_HEADER = ["Lead", "ICP (0-25)", "Intent (0-25)", "Budget (0-20)",
                 "Reachability (0-15)", "Timing (0-15)", "Total", "Tier"]
@@ -79,6 +91,7 @@ HEADERS = {
     # Sent/rejected/stale drafts leave the Drafts queue for here, so the queue
     # stays a screenful. Same schema, append-only.
     "DraftsArchive": DRAFTS_HEADER,
+    "AllLeads": ALL_LEADS_HEADER,
 }
 
 # Pause between live tab writes so bursts of clear+update calls stay well under

@@ -26,6 +26,44 @@ COMMAND_HELP = {
 
 KNOWN_COMMANDS = {c.lower(): c for c in COMMAND_HELP}
 
+# What a SHARED (guest) user may do. Read-only on purpose: these never spend
+# discovery credits, never write the owner's sheet, never approve drafts and
+# never trigger a workflow run.
+GUEST_COMMANDS = {
+    "/help", "/id", "/status", "/batch", "/sheet", "/drafts",
+    "/list drafts", "/usage",
+}
+
+
+def role_for(user_id: int, admin_ids: list[int],
+             guest_ids: list[int] | None = None) -> str:
+    """Who is this? 'owner' | 'guest' | 'blocked'.
+
+    Empty admin list keeps the historical open-bot behaviour (the owner has not
+    set ADMIN_TELEGRAM_IDS yet), so a fresh install still answers everybody.
+    """
+    guests = guest_ids or []
+    if user_id in (admin_ids or []):
+        return "owner"
+    if user_id in guests:
+        return "guest"
+    if not admin_ids:
+        return "owner"
+    return "blocked"
+
+
+def denied_message(user_id: int) -> str:
+    """Sent to a stranger instead of silence, so sharing looks deliberate.
+
+    Silence is why a shared bot feels broken: the owner forwards the link, the
+    other person sends a message, and nothing ever comes back.
+    """
+    return (
+        "🔒 This bot is private.\n\n"
+        f"Your Telegram user ID is {user_id}. Send it to the owner and they can "
+        "add you as a guest."
+    )
+
 
 def parse_command(text: str | None) -> tuple[str, str]:
     """Return (canonical_command, args) from a message text.
@@ -44,9 +82,14 @@ def parse_command(text: str | None) -> tuple[str, str]:
     return "", ""
 
 
-def is_allowed(user_id: int, admin_ids: list[int]) -> bool:
-    """Allow-list rule (spec 5.2): empty allow-list == open bot."""
-    return not admin_ids or user_id in admin_ids
+def is_allowed(user_id: int, admin_ids: list[int],
+               guest_ids: list[int] | None = None) -> bool:
+    """Allow-list rule (spec 5.2): empty allow-list == open bot.
+
+    Guests are allowed too - they get a restricted command set rather than a
+    hard block, so the bot is usable when shared.
+    """
+    return role_for(user_id, admin_ids, guest_ids) != "blocked"
 
 
 def build_help() -> str:
@@ -66,6 +109,11 @@ def build_help() -> str:
     lines.append("  · 'score ABC Plumbing 4.8 stars 120 reviews' — Scout scores it")
     lines.append("  · 'draft an email for a dental clinic in Atlanta' — Outreach drafts")
     lines.append("  · 'what leads do we have in Tampa?' — check the sheets")
+    lines.append("")
+    lines.append("👥 Sharing: guests see only read-only commands — " +
+                 ", ".join(sorted(GUEST_COMMANDS)) + ". "
+                 "Everything that spends credits, writes the sheet or approves "
+                 "drafts stays with the owner.")
     return "\n".join(lines)
 
 

@@ -106,7 +106,9 @@ TOOLKIT_BY_PREFIX: tuple[tuple[str, str], ...] = (
 )
 
 REQUIRED_CONNECTIONS = ("googlesheets", "gmail")
-OPTIONAL_CONNECTIONS = ("instagram", "github", "google_maps", "serpapi", "zenserp", "tavily")
+# No instagram: DM sending is retired, so a missing IG account is not a
+# connection problem and must not be reported as one.
+OPTIONAL_CONNECTIONS = ("github", "google_maps", "serpapi", "zenserp", "tavily")
 
 
 class ComposioNotConfigured(Exception):

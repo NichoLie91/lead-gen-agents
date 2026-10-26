@@ -2,10 +2,14 @@
 
 Usage:
     COMPOSIO_API_KEY=<key> python -m src.preflight
-        -> print live status of every connection (googlesheets, gmail, instagram)
+        -> print live status of every connection (googlesheets, gmail)
 
-    COMPOSIO_API_KEY=<key> python -m src.preflight --connect gmail googlesheets instagram
+    COMPOSIO_API_KEY=<key> python -m src.preflight --connect gmail googlesheets
         -> mint OAuth login links for the exact tools so they can be authorized
+
+Instagram is NOT a required connection: the Instagram DM stage is retired, so
+no Meta Business account has to be linked for discovery, scoring, drafting or
+the Telegram bot to work.
 
 Works with the composio-core SDK when installed, otherwise falls back to the
 Composio REST API via httpx. NOTE: an API key is REQUIRED in both cases — the
@@ -24,7 +28,8 @@ from src.core.config import Settings
 log = logging.getLogger(__name__)
 
 REQUIRED = ("googlesheets", "gmail")
-OPTIONAL = ("instagram", "github")
+# No Instagram: DM sending is retired, so an IG account is never needed.
+OPTIONAL = ("github",)
 
 
 async def _check() -> None:
@@ -43,8 +48,9 @@ async def _check() -> None:
         print(f"  {marker}{conn}: {status}")
     required_ok = all(statuses.get(c) == "ACTIVE" for c in REQUIRED)
     print(f"\nRequired connections (googlesheets + gmail) ready: {required_ok}")
-    if statuses.get("instagram") != "ACTIVE":
-        print("Instagram: not ready — connect a Meta Business IG account via Composio OAuth.")
+    if not required_ok:
+        print("Missing a required connection — mint a link with "
+              "--connect gmail googlesheets")
 
 
 async def _rest_preflight(api_key: str) -> dict[str, str]:
@@ -81,7 +87,7 @@ async def _check_with_rest(api_key: str) -> None:
 
 
 # App name used to *initiate* connections (Composio slugs).
-APP_SLUGS = {"googlesheets": "googlesheets", "gmail": "gmail", "instagram": "instagram_business"}
+APP_SLUGS = {"googlesheets": "googlesheets", "gmail": "gmail"}
 
 
 async def _make_connection_link(composio: ComposioAgent, app: str) -> str:
@@ -195,7 +201,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Composio connection checks")
     parser.add_argument("--connect", nargs="*", default=None,
                         help="Generate OAuth login links for the given tools "
-                             "(googlesheets, gmail, instagram)")
+                             "(googlesheets, gmail)")
     parser.add_argument("--catalog", action="store_true",
                         help="Scan the Composio catalog for maps / web-search actions")
     args = parser.parse_args()

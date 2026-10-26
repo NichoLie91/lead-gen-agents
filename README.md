@@ -47,6 +47,37 @@ Agent** (tool gateway + web-search enrichment).
 | `/usage` | Which Gemini key + model handled the last N LLM calls (load-split dashboard) |
 | `/help`, `/id` | Command list; show your Telegram user ID |
 
+## One master lead list (`AllLeads` tab)
+
+Every run writes a single **AllLeads** spreadsheet tab: every lead from every
+other tab (Pipeline, Score, Outreach, Drafts, CRM) plus the current run's
+fresh leads, in one list. Columns: `lead_id, business_name, trade, city,
+state, public_phone, owner_or_manager_phone, email, email_status, website,
+rating, review_count, scout_score, scout_tier, sales_status, sources,
+first_seen, last_seen`.
+
+- **Two phone numbers.** `public_phone` is the business's Google Maps number.
+  `owner_or_manager_phone` is a *different* number printed on their website next
+to owner/manager/mobile wording — blank when the page does not name one, so a
+wrong mobile never ends up on a call list.
+- **No duplicates.** A lead is the same lead when the phone (last 10 digits),
+the email, or name+city matches. Rows are merged field-by-field, so a repeat
+run enriches the existing row instead of adding a twin. Name-only rows from
+Outreach/CRM join the single matching city row; if two cities share the name
+they stay separate rather than borrowing each other's phone.
+- **It accumulates.** A quiet day never rewrites the list down to nothing.
+
+## Sharing the Telegram bot
+
+The bot is private by default: only IDs in `ADMIN_TELEGRAM_IDS` can use it. To
+share it, add the other person's Telegram user ID to `GUEST_TELEGRAM_IDS`
+(they can send `/id` to the bot — the bot replies with the ID even when they
+are not authorised yet). Guests get read-only access: `/help`, `/id`,
+`/status`, `/batch`, `/sheet`, `/drafts`, `/list drafts`, `/usage` and
+plain-English questions. Triggering runs, approving drafts, `/stop` and
+anything that spends discovery credits stays with the owner. With both lists
+empty the bot is OPEN to anyone — leave that only for a first test.
+
 ## GitHub rate limiting
 
 All GitHub API usage flows through `src/core/rate_limiter.py`: a conservative
@@ -62,9 +93,11 @@ backoff, and a persisted budget that survives across ephemeral Actions jobs.
   (optional: direct web-extract fallback for email enrichment),
   `GOOGLE_SHEET_ID`.
 - **Composio connections**: `googlesheets` + `gmail` (ACTIVE for your
-  connected Google account), `instagram` (connect a Meta Business account),
-  `tavily` (web-search enrichment; without it, email extraction degrades to
-  `NEEDS_ENRICHMENT`).
+  connected Google account), `tavily` (web-search enrichment; without it,
+  email extraction degrades to `NEEDS_ENRICHMENT`). **No Instagram account is
+  required** — the DM stage is retired, so nothing needs a Meta Business login.
+- **Discovery**: `SERPER_API_KEY` (free 2,500 queries) is the Maps provider;
+  without it discovery falls back to the Composio Maps chain.
 - **Gemini**: two model tiers over (up to) two keys. `GEMINI_API_KEY_2`
   (optional) round-robins every LLM call across both keys — splitting load and
   roughly doubling the free-tier daily quota. Every call runs a **failover

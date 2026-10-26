@@ -53,6 +53,8 @@ jobs:
           GEMINI_MODEL_PRO: ${{ vars.GEMINI_MODEL_PRO }}     # repo variable, default gemini-flash-latest
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          GUEST_TELEGRAM_IDS: ${{ secrets.GUEST_TELEGRAM_IDS }}   # shared users (read-only); empty = just the admin
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}           # free-text discovery tasks (/run discovery)
           TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}

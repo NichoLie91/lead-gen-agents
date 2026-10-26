@@ -105,6 +105,6 @@ def test_ensure_sheet_backfills_tabs_created_later(tmp_path):
     assert asyncio.run(sheets.ensure_sheet()) == "sid-pipeline"
     # Every tab missing from the persisted ids gets backfilled.
     assert fake.created == ["Score", "Outreach", "Drafts", "Followup", "CRM",
-                            "DraftsArchive"]
+                            "DraftsArchive", "AllLeads"]
     assert sheets._tab_sheet_id("CRM") == "sid-CRM"
     assert state.load("sheet_ids", {}).get("CRM") == "sid-CRM"
