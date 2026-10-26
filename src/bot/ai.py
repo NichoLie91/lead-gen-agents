@@ -12,6 +12,7 @@ names or spreadsheets.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -81,6 +82,12 @@ _SYSTEM_BRIEF = (
     "- 'exclude leads below 70' -> filter: min_score=70\n"
     "- 'find dental leads in Atlanta with 90+ score' -> filter: min_score=90, vertical=dental, city=Atlanta"
 )
+
+
+# A Telegram reply must not wait for the pool's whole failover chain (four
+# attempts x the per-call ceiling). This caps the INTENT decision; past it the
+# bot says "Gemini is busy" instead of going quiet.
+INTENT_TIMEOUT_SEC = 60.0
 
 
 def build_intent_prompt(user_text: str, context: str = "") -> str:
@@ -207,13 +214,19 @@ async def classify_intent(llm, user_text: str, context: str = "",
       so the bot can tell the owner "Gemini is busy" instead of "I don't
       understand".
     """
-    raw = await llm.complete(build_intent_prompt(user_text, context))
+    prompt = build_intent_prompt(user_text, context)
+    try:
+        raw = await asyncio.wait_for(llm.complete(prompt), INTENT_TIMEOUT_SEC)
+    except TimeoutError:
+        log.warning("intent classification timed out; answering 'busy'")
+        return {"action": "unavailable"}
     if not raw:  # transient API hiccup -> one quick retry
-        import asyncio
-
         if retry_delay:
             await asyncio.sleep(retry_delay)
-        raw = await llm.complete(build_intent_prompt(user_text, context))
+        try:
+            raw = await asyncio.wait_for(llm.complete(prompt), INTENT_TIMEOUT_SEC)
+        except TimeoutError:
+            return {"action": "unavailable"}
     if not raw:
         return {"action": "unavailable"}
     return parse_intent_response(raw)

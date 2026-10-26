@@ -6,6 +6,7 @@ template-based drafting. Kept behind a tiny wrapper so tests never need a key.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,6 +17,13 @@ from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# Hard ceiling on ONE Gemini call. The SDK has no timeout of its own, so a
+# stalled connection used to hang the caller until the whole job died — from
+# Telegram that looks like a dead bot (no reply, ever). 45s is long enough for
+# a full draft and short enough that the pool still fails over inside one
+# poll window.
+LLM_TIMEOUT_SEC = 45.0
 
 
 def classify_gemini_error(exc: Exception) -> str:
@@ -72,11 +80,20 @@ class GeminiClient:
             # The pipeline awaits complete() everywhere, so call through the
             # aio client — awaiting the sync call used to raise TypeError and
             # silently fall back to templates.
-            resp = await self._client.aio.models.generate_content(
-                model=self._model,
-                contents=prompt,
+            resp = await asyncio.wait_for(
+                self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                ),
+                timeout=LLM_TIMEOUT_SEC,
             )
             return (resp.text or "").strip()
+        except TimeoutError:
+            self.last_error = f"timeout after {LLM_TIMEOUT_SEC:.0f}s"
+            self.error_kind = "transient"
+            log.warning("Gemini call timed out after %.0fs; failing over",
+                        LLM_TIMEOUT_SEC)
+            return ""
         except Exception as exc:  # quota (429), model 404, transient — pool retries
             self.last_error = str(exc)[:300]
             self.error_kind = classify_gemini_error(exc)

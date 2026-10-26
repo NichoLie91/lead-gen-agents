@@ -364,3 +364,21 @@ def test_poll_once_processes_update_equal_to_offset(tmp_path, monkeypatch):
     assert processed == 1                      # the stuck update was processed
     assert len(sent) == 1                      # and got its reply
     assert state.get("telegram_offset", "offset") == 704228565  # last + 1
+
+
+def test_a_stalled_brain_answers_busy_instead_of_going_quiet(monkeypatch):
+    """Gemini 503s and stalls are normal; the bot must still answer."""
+    import asyncio as _asyncio
+
+    from src.bot import ai
+
+    class Stalled:
+        available = True
+
+        async def complete(self, prompt, **kwargs):
+            await _asyncio.sleep(10)
+            return ""
+
+    monkeypatch.setattr(ai, "INTENT_TIMEOUT_SEC", 0.02)
+    intent = _asyncio.run(ai.classify_intent(Stalled(), "find plumber leads", ""))
+    assert intent == {"action": "unavailable"}

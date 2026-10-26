@@ -291,3 +291,30 @@ def test_settings_load_key2_and_role_models():
     s = Settings.load({"GEMINI_MODEL_FAST": "", "GEMINI_MODEL_PRO": ""})
     assert s.gemini_model_fast == "gemini-flash-latest"
     assert s.gemini_model_pro == "gemini-flash-latest"
+
+
+# ---------- a stalled call must not hang the caller ----------
+
+def test_a_stalled_gemini_call_times_out_instead_of_hanging(monkeypatch):
+    """The SDK has no timeout: a stalled connection hung the Telegram reply
+    until the job died, which looks exactly like a dead bot."""
+    import types
+
+    from src.core import llm
+
+    monkeypatch.setattr(llm, "LLM_TIMEOUT_SEC", 0.02)
+
+    class _Models:
+        async def generate_content(self, model, contents):
+            await asyncio.sleep(5)
+            return types.SimpleNamespace(text="late")
+
+    client = llm.GeminiClient.__new__(llm.GeminiClient)
+    client._client = types.SimpleNamespace(aio=types.SimpleNamespace(models=_Models()))
+    client._model = "m"
+    client.last_error = None
+    client.error_kind = None
+
+    assert asyncio.run(client.complete("prompt")) == ""
+    assert client.error_kind == "transient", "a timeout must let the pool fail over"
+    assert "timeout" in (client.last_error or "")
