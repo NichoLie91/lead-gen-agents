@@ -1,9 +1,9 @@
 {
-  "run_id": "5f6d007f",
+  "run_id": "c9b25b0a",
   "mode": "discovery",
-  "started_at": "2026-10-25T18:17:53.302398+00:00",
+  "started_at": "2026-10-26T07:03:42.175084+00:00",
   "status": "FAILED",
   "metrics": {},
-  "error": "Discovery returned 0 leads from 912 queries (38 verticals x 24 metros). Provider state: GOOGLE_MAPS_TEXT_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu; SERPAPI_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit serpapi\",\"code\":1810,\"slug\":\"ActionExecu; ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit zenserp\",\"code\":1810,\"slug\":\"ActionExecu; GOOGLE_MAPS_NEARBY_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu",
-  "finished_at": "2026-10-25T18:18:03.989279+00:00"
+  "error": "Discovery returned 0 leads from 918 queries (38 verticals x 24 metros). Provider state: GOOGLE_MAPS_TEXT_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu; SERPAPI_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit serpapi\",\"code\":1810,\"slug\":\"ActionExecu; ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit zenserp\",\"code\":1810,\"slug\":\"ActionExecu; GOOGLE_MAPS_NEARBY_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu",
+  "finished_at": "2026-10-26T07:08:30.860226+00:00"
 }
