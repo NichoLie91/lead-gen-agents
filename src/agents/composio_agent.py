@@ -56,10 +56,12 @@ RETRYABLE_HINTS = (
 )
 
 # Slug resolution table (spec 6.2): purpose -> candidate action slugs.
-# Verified against the live v3 catalog (2026-08): the googlesheets toolkit has
-# NO add-tab action, so each tab lives in its own spreadsheet
-# (GOOGLESHEETS_SHEET_FROM_JSON) and tabs are rewritten via clear-range +
+# Verified against the live v3 catalog (2026-10): the googlesheets toolkit DOES
+# expose an add-tab action (GOOGLESHEETS_ADD_SHEET), so every logical tab now
+# lives in ONE spreadsheet and is written via clear-range +
 # GOOGLESHEETS_BATCH_UPDATE (named-tab write). Reads use GOOGLESHEETS_BATCH_GET.
+# ADD_SHEET takes {"spreadsheetId", "properties": {"title"}} — a title passed
+# under any other key is ignored and the tab silently becomes "Sheet<N>".
 SLUG_ALIASES: dict[str, list[str]] = {
     "send_email": ["GMAIL_SEND_EMAIL", "GMAIL_SEND_MESSAGE"],
     "create_draft": ["GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_CREATE_DRAFT"],
@@ -69,6 +71,9 @@ SLUG_ALIASES: dict[str, list[str]] = {
     "mail_fetch_message": ["GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID"],
     "mail_reply_thread": ["GMAIL_REPLY_TO_THREAD"],
     "sheet_create_named": ["GOOGLESHEETS_SHEET_FROM_JSON"],
+    "spreadsheet_create": ["GOOGLESHEETS_CREATE_GOOGLE_SHEET1"],
+    "sheet_add_tab": ["GOOGLESHEETS_ADD_SHEET"],
+    "sheet_delete_tab": ["GOOGLESHEETS_DELETE_SHEET"],
     "sheet_clear": ["GOOGLESHEETS_CLEAR_VALUES"],
     "sheet_values_update": ["GOOGLESHEETS_BATCH_UPDATE"],
     "sheet_get_info": ["GOOGLESHEETS_GET_SPREADSHEET_INFO", "GOOGLESHEETS_GET_SHEET_NAMES"],

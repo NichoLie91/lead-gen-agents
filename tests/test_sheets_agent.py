@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from src.agents.composio_agent import ComposioAgent
-from src.agents.sheets_agent import SheetsAgent
+from src.agents.sheets_agent import HEADERS, SheetReadError, SheetsAgent
 from src.core.config import Settings
 from src.core.state import StateStore
 
@@ -77,24 +77,41 @@ def test_write_tab_sanitizes_none_and_bool_cells(tmp_path):
     assert rows[1] == ["Biz A", "", "TRUE", "FALSE", 1.5]
 
 
-def test_ensure_sheet_backfills_tabs_created_later(tmp_path):
-    # Regression: ensure_sheet used to early-return when the Pipeline sheet
-    # existed, so tabs added later (CRM) were never created and flush() logged
-    # "no spreadsheet for tab CRM; skipping live write".
-    class FakeComposio:
-        connected = True
-        def __init__(self):
-            self.created: list[str] = []
-        def slug(self, name: str) -> str:
-            return name
-        async def execute_action(self, slug: str, args: dict) -> dict:
-            if slug == "sheet_create_named":
-                tab = args["sheet_name"]
-                self.created.append(tab)
-                return {"ok": True,
-                        "data": {"response_data": {"spreadsheetId": f"sid-{tab}"}}}
-            return {"ok": False, "error": "unexpected call"}
+class FakeComposio:
+    """One spreadsheet that starts with a single Pipeline tab."""
 
+    connected = True
+
+    def __init__(self, tabs=("Pipeline",), legacy_rows=None):
+        self.tabs = list(tabs)
+        self.created: list[str] = []
+        self.written: list[tuple[str, list]] = []
+        self.legacy_rows = legacy_rows or {}
+
+    def slug(self, name: str) -> str:
+        return name
+
+    async def execute_action(self, slug: str, args: dict) -> dict:
+        if slug == "sheet_get_info":
+            return {"ok": True, "data": {"sheets":
+                    [{"properties": {"title": t}} for t in self.tabs]}}
+        if slug == "sheet_add_tab":
+            title = args["properties"]["title"]
+            self.created.append(title)
+            self.tabs.append(title)
+            return {"ok": True, "data": {}}
+        if slug == "sheet_values_update":
+            self.written.append((args["sheet_name"], args["values"]))
+            return {"ok": True, "data": {}}
+        if slug == "sheet_read":
+            return {"ok": True, "data": {"values": self.legacy_rows.get(
+                args["spreadsheet_id"], [])}}
+        return {"ok": False, "error": "unexpected call"}
+
+
+def test_ensure_sheet_creates_every_tab_in_one_spreadsheet(tmp_path):
+    # ONE file: the tabs that used to live in seven spreadsheets are added as
+    # tabs of the spreadsheet GOOGLE_SHEET_ID already points at.
     fake = FakeComposio()
     settings = Settings(dry_run=False, repo_root=tmp_path)
     state = StateStore(tmp_path / "state")
@@ -103,8 +120,86 @@ def test_ensure_sheet_backfills_tabs_created_later(tmp_path):
     sheets = SheetsAgent(fake, settings, state)
 
     assert asyncio.run(sheets.ensure_sheet()) == "sid-pipeline"
-    # Every tab missing from the persisted ids gets backfilled.
     assert fake.created == ["Score", "Outreach", "Drafts", "Followup", "CRM",
                             "DraftsArchive", "AllLeads"]
-    assert sheets._tab_sheet_id("CRM") == "sid-CRM"
-    assert state.load("sheet_ids", {}).get("CRM") == "sid-CRM"
+    for tab in ("Pipeline", "Score", "CRM", "AllLeads"):
+        assert sheets._tab_sheet_id(tab) == "sid-pipeline", tab
+    saved = state.load("sheet_ids", {})
+    assert set(saved.values()) == {"sid-pipeline"}
+    assert state.load("sheet_unified", "") == "sid-pipeline"
+
+
+def test_ensure_sheet_migrates_rows_from_the_old_per_tab_files(tmp_path):
+    legacy = {"sid-old-score": [["Lead", "Total"], ["Blue Creek", 82]]}
+    fake = FakeComposio(legacy_rows=legacy)
+    settings = Settings(dry_run=False, repo_root=tmp_path)
+    state = StateStore(tmp_path / "state")
+    state.save("sheet_ids", {"Pipeline": "sid-pipeline", "Score": "sid-old-score"})
+    settings.google_sheet_id = "sid-pipeline"
+    sheets = SheetsAgent(fake, settings, state)
+
+    asyncio.run(sheets.ensure_sheet())
+
+    seeded = [values for tab, values in fake.written if tab == "Score"]
+    assert seeded, "old Score rows must be copied into the new tab"
+    written_rows = [row for values in seeded for row in values]
+    # Rows are re-mapped into the new tab's header order (the old file had a
+    # short "Lead | Total" header), and the old header row is not carried over.
+    total_i = HEADERS["Score"].index("Total")
+    blue = next(row for row in written_rows if row[0] == "Blue Creek")
+    assert str(blue[total_i]) == "82"
+    assert sum(1 for row in written_rows if row[0] == "Lead") == 1, \
+        "exactly one header row, no duplicated header inside the data"
+    assert state.load("sheet_ids_legacy", {}).get("Score") == "sid-old-score"
+
+
+def test_ensure_sheet_is_idempotent(tmp_path):
+    fake = FakeComposio(tabs=("Pipeline", "Score", "Outreach", "Drafts",
+                              "Followup", "CRM", "DraftsArchive", "AllLeads"))
+    settings = Settings(dry_run=False, repo_root=tmp_path)
+    state = StateStore(tmp_path / "state")
+    settings.google_sheet_id = "sid-pipeline"
+    sheets = SheetsAgent(fake, settings, state)
+
+    asyncio.run(sheets.ensure_sheet())
+    asyncio.run(sheets.ensure_sheet())
+    assert fake.created == [], "an existing tab must never be re-created"
+
+
+def test_a_failed_read_raises_and_is_not_cached(tmp_path):
+    # Regression: a throttled read returned [] and the AllLeads builder then
+    # rebuilt the master list without that tab, silently dropping its leads.
+    class Throttled(FakeComposio):
+        async def execute_action(self, slug: str, args: dict) -> dict:
+            if slug == "sheet_read":
+                return {"ok": False, "error": "429 Quota exceeded for Read requests"}
+            return await super().execute_action(slug, args)
+
+    settings = Settings(dry_run=False, repo_root=tmp_path)
+    state = StateStore(tmp_path / "state")
+    settings.google_sheet_id = "sid-pipeline"
+    sheets = SheetsAgent(Throttled(), settings, state)
+    sheets._sheet_ids = {"Pipeline": "sid-pipeline"}
+
+    try:
+        asyncio.run(sheets.read_tab("Pipeline"))
+    except SheetReadError:
+        pass
+    else:
+        raise AssertionError("a failed read must not look like an empty tab")
+    assert sheets.read_cache_size() == 0, "the failure must not be cached as []"
+
+
+def test_non_strict_read_returns_empty_for_display_callers(tmp_path):
+    class Throttled(FakeComposio):
+        async def execute_action(self, slug: str, args: dict) -> dict:
+            if slug == "sheet_read":
+                return {"ok": False, "error": "429 Quota exceeded"}
+            return await super().execute_action(slug, args)
+
+    settings = Settings(dry_run=False, repo_root=tmp_path)
+    state = StateStore(tmp_path / "state")
+    settings.google_sheet_id = "sid-pipeline"
+    sheets = SheetsAgent(Throttled(), settings, state)
+    sheets._sheet_ids = {"Pipeline": "sid-pipeline"}
+    assert asyncio.run(sheets.read_tab("Pipeline", strict=False)) == []

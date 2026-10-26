@@ -287,7 +287,11 @@ class Pipeline:
                 await self._stage_retired_senders(mode, report)
                 self._check_stop()
 
-            if mode == "full":
+            # Every mode that found + scored leads writes them to the Pipeline
+            # tab, not just `full`. The daily schedule runs `discovery`, and
+            # gating this on `full` meant the one tab every report links to sat
+            # empty while the leads went to the Score tab of another file.
+            if mode in DISCOVERY_MODES:
                 await self._stage_pipeline(scored, report)
 
             if mode == "purge":
@@ -332,8 +336,7 @@ class Pipeline:
 
             report["status"] = "COMPLETED"
             if not self.settings.dry_run:
-                sheet_url = (f"https://docs.google.com/spreadsheets/d/{self.settings.google_sheet_id}"
-                             if self.settings.google_sheet_id else "")
+                sheet_url = self.sheets.sheet_url() if not self.settings.dry_run else ""
                 await self.notifier.notify(self.build_report_text(report, sheet_url))
         except StopRequested:
             report["status"] = "STOPPED"
@@ -669,7 +672,10 @@ class Pipeline:
         try:
             rows = await build_all_leads(self.sheets, leads)
         except Exception as exc:
-            log.warning("all-leads build failed: %s", exc)
+            # A tab that could not be read must ABORT the rebuild, not shrink
+            # it: writing here would replace the master list with a partial one
+            # and quietly lose every lead that lived in the unreadable tab.
+            log.warning("all-leads build failed, master list left untouched: %s", exc)
             report["metrics"]["all_leads_error"] = str(exc)[:200]
             return
         await self.sheets.write_tab("AllLeads", to_rows(rows))
@@ -678,6 +684,9 @@ class Pipeline:
             1 for r in rows if str(r.get("email") or "").strip())
         report["metrics"]["all_leads_with_owner_phone"] = sum(
             1 for r in rows if str(r.get("owner_or_manager_phone") or "").strip())
+        report["metrics"]["all_leads_with_phone"] = sum(
+            1 for r in rows if str(r.get("public_phone") or "").strip()
+            or str(r.get("owner_or_manager_phone") or "").strip())
 
     # ---------- daily research batch (detective -> writer -> closer) ----------
     async def _load_pipeline_leads(self) -> list[dict]:
@@ -1375,6 +1384,15 @@ class Pipeline:
                 lines.append(
                     f"Research batch: {metrics['research_batch']} drafted "
                     f"({metrics.get('research_no_problem', 0)} skipped, nothing seen){note}"
+                )
+            if metrics.get("all_leads_error"):
+                lines.append("⚠️ Master list NOT updated (a tab could not be read): "
+                             f"{metrics['all_leads_error']}")
+            elif "all_leads" in metrics:
+                lines.append(
+                    f"Master list: {metrics['all_leads']} leads "
+                    f"({metrics.get('all_leads_with_email', 0)} with email, "
+                    f"{metrics.get('all_leads_with_phone', 0)} with a phone)"
                 )
             if metrics.get("sheet_tabs_failed"):
                 lines.append(f"⚠️ Sheet write FAILED for {metrics['sheet_tabs_failed']} tab(s) "
