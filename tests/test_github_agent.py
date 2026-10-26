@@ -300,3 +300,52 @@ def test_commit_state_retries_push_with_rebase(monkeypatch, tmp_path):
     assert rebase_seen["done"] is True           # a rebase was attempted
     assert sum(1 for c in calls
                if "push" in c and "origin" in c and "HEAD" in c) == 2
+
+
+def test_commit_state_survives_a_rebase_conflict(monkeypatch, tmp_path):
+    """Two jobs writing the same state file must not lose the newer state.
+
+    2026-10-25: run-pipeline and research-batch both wrote
+    state/research_batch.json. The batch's push lost the race, its
+    ``pull --rebase`` hit a conflict ("could not apply c9fb9ea") and the whole
+    hand-over was dropped. Newest run wins instead.
+    """
+    ours, theirs, bare = tmp_path / "ours", tmp_path / "theirs", tmp_path / "bare.git"
+    ours.mkdir()
+    _git("init", "-b", "main", cwd=ours)
+    _git("config", "user.email", "bot@example.com", cwd=ours)
+    _git("config", "user.name", "bot", cwd=ours)
+    (ours / "state").mkdir()
+    (ours / "state" / "telegram_offset.json").write_text('{"offset": 1}')
+    _git("add", "-A", cwd=ours)
+    _git("commit", "-m", "init", cwd=ours)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)],
+                   check=True, capture_output=True)
+    _git("remote", "add", "origin", str(bare), cwd=ours)
+    _git("push", "-u", "origin", "main", cwd=ours)
+
+    # A concurrent job commits a DIFFERENT value for the same file.
+    subprocess.run(["git", "clone", "-b", "main", str(bare), str(theirs)],
+                   check=True, capture_output=True)
+    _git("config", "user.email", "bot@example.com", cwd=theirs)
+    _git("config", "user.name", "bot", cwd=theirs)
+    (theirs / "state" / "telegram_offset.json").write_text('{"offset": 2}')
+    _git("commit", "-am", "other job state", cwd=theirs)
+    _git("push", "origin", "main", cwd=theirs)
+
+    # Our tree holds the newest state; every push will conflict.
+    (ours / "state" / "telegram_offset.json").write_text('{"offset": 3}')
+    settings = Settings(repo_root=ours, gh_pat="ghp_test", dry_run=False)
+    github = GitHubAgent(settings, StateStore(ours))
+
+    # Safety: outside CI the recovery must never hard-reset a working tree.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert github._state_wins_over_conflict(
+        ours, {"state/telegram_offset.json": b'{"offset": 3}'}) is False
+    assert (ours / "state" / "telegram_offset.json").read_text() == '{"offset": 3}'
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert github.commit_state() is True
+
+    _git("fetch", "origin", cwd=ours)
+    assert _git("show", "origin/main:state/telegram_offset.json", cwd=ours).strip() == '{"offset": 3}'

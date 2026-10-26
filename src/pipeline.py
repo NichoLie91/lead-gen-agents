@@ -1382,6 +1382,13 @@ def main() -> None:
     if not settings.dry_run and settings.google_sheet_id:
         sheet_url = f"https://docs.google.com/spreadsheets/d/{settings.google_sheet_id}"
     print(Pipeline.build_report_text(report, sheet_url))
+    # run() swallows the exception, records status=FAILED and returns the report,
+    # so the process used to exit 0 and Actions painted a failed run green (the
+    # 2026-10-25 run: 918 queries, 0 leads, conclusion=success). Exit non-zero so
+    # the run goes red and GitHub's failure mail fires, but only AFTER the report
+    # is printed and run()'s finally block has committed state + alerted Telegram.
+    if report.get("status") == "FAILED":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

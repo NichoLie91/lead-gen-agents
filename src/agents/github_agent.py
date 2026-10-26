@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 
@@ -109,6 +110,11 @@ class GitHubAgent:
                 # would make the next poll re-process updates.
                 log.warning("state push rejected, retrying with rebase: %s",
                             push.stderr.decode(errors="replace").strip().splitlines()[-1:])
+                # Snapshot the intended bytes BEFORE rebasing: a conflicted pull
+                # leaves <<<<<<< markers in the working tree, so reading the
+                # files after the failure would commit conflict markers as state.
+                intended = {rel: (root / rel).read_bytes()
+                            for rel in paths if (root / rel).exists()}
                 rebase = subprocess.run(
                     # autostash: a concurrent job may have left other state
                     # files modified in this tree; stash them, rebase, reapply.
@@ -119,7 +125,8 @@ class GitHubAgent:
                 if rebase.returncode != 0:
                     log.warning("state rebase failed: %s",
                                 rebase.stderr.decode(errors="replace")[:200])
-                    return False
+                    if not self._state_wins_over_conflict(root, intended):
+                        return False
                 push = subprocess.run(
                     ["git", "-C", str(root), "push", "origin", "HEAD"],
                     capture_output=True, env=self._git_env(), check=False,
@@ -132,6 +139,52 @@ class GitHubAgent:
         except Exception as exc:
             log.warning("commit_state failed: %s", exc)
             return False
+
+    def _state_wins_over_conflict(self, root: Path, intended: dict[str, bytes]) -> bool:
+        """Last-writer-wins recovery when a rebase conflict blocks the push.
+
+        Two jobs legitimately write the same state file (run-pipeline and
+        research-batch both own last_run.json and research_batch.json). When
+        both commit, the second job's rebase hits a conflict, the whole push
+        is abandoned and that run's state is silently dropped — exactly how
+        the 2026-10-25 hand-over was lost ("could not apply c9fb9ea").
+
+        These are single-writer state snapshots, not shared documents, so the
+        newest version is by definition the right one: keep OUR bytes, reset
+        the tree to the remote tip, put them back, recommit.
+
+        CI ONLY. A hard reset inside a human's working tree would throw away
+        their uncommitted work, so outside Actions this stays a clean failure.
+        """
+        if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+            return False
+        # Drop any half-applied rebase before we touch the tree.
+        subprocess.run(["git", "-C", str(root), "rebase", "--abort"],
+                       capture_output=True, env=self._git_env(), check=False)
+        reset = subprocess.run(
+            # origin/main was refreshed by the failed pull above.
+            ["git", "-C", str(root), "reset", "--hard", "origin/main"],
+            capture_output=True, env=self._git_env(), check=False,
+        )
+        if reset.returncode != 0:
+            log.warning("state conflict recovery: reset failed: %s",
+                        reset.stderr.decode(errors="replace")[:200])
+            return False
+        for rel, blob in intended.items():
+            (root / rel).write_bytes(blob)
+        subprocess.run(["git", "-C", str(root), "add", "--", *intended],
+                       capture_output=True, env=self._git_env(), check=False)
+        commit = subprocess.run(
+            ["git", "-C", str(root), "commit", "-m",
+             "chore(state): newest run wins over rebase conflict"],
+            capture_output=True, env=self._git_env(), check=False,
+        )
+        if commit.returncode != 0 and b"nothing to commit" not in commit.stderr:
+            log.warning("state conflict recovery: commit failed: %s",
+                        commit.stderr.decode(errors="replace")[:200])
+            return False
+        log.info("state conflict recovered: newest state kept over remote tip")
+        return True
 
     def _git_env(self) -> dict:
         env = {
