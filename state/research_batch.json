@@ -1,6 +1,6 @@
 {
-  "cursor": 0,
-  "awaiting_confirm": false,
+  "cursor": 4,
+  "awaiting_confirm": true,
   "done": [
     "eb60123fe4e35eca2cbd0327e7622b864dc445665a095a493de112e6dc673d68",
     "7e092d70c58123161fa88edd9e0f7609af302b587403232e3615cf77cf987b61",
@@ -261,12 +261,30 @@
     "0320f1788749818414bbf32af7138763e43941caa91ecd47fa59394e2d26c8ea",
     "4f149f240302098be9093274da9af4df0c3215071ead58f2153c27f06db3b916",
     "b1f37cf0f04ab6f45a6a0f190e3022401c318eeb7bca9e79d352bbe0d8e80bb2",
-    "f4705f017adf1e1e7c73fd44185c2a3edd6d03421aede7e10891ad36fb12f356"
+    "f4705f017adf1e1e7c73fd44185c2a3edd6d03421aede7e10891ad36fb12f356",
+    "976c69c3c59ee2b4a95828f0e176db1fcc0956aada97fe710929b2a52ded01ff",
+    "69f283b6d93d4640b21a8d38e9cdfdac336e2f6460a1c614e3ab6007366f61e7",
+    "dd145203a5cab0562debb17f0680fe2d85ff42370183276364234413b0e345c2",
+    "5b9d1d3d7dbb050afdf67bdeacf28295786674a13e36b68590c8ea0e784b5007",
+    "4064ac838754715c938d3a8e474a2e858e150cce037ec023620ffea927b4da78",
+    "2fdfd3b9f840b1918ac0cb855b91c8e930a8db623e94a9a275bcd98670300b74",
+    "c75430d89217ae0a91dd2a6d7e4f5e54cb4d553646428ff5b30443a4d6c27102"
   ],
-  "retry": {},
-  "retries": {},
-  "batches": 0,
-  "last_batch_date": "",
+  "retry": {
+    "45399350f4cfb5a2fbde3e708ba8389896fe2ea7ebfa9b76dbd32090c674998d": "2026-11-03",
+    "0b7c98fae0e8f34789b15e7af412461d58dabff0503e13fef5b9a61f461578cb": "2026-11-03",
+    "f6cd414d117fe35822a591dcb5e305008dd30d5c88b8e74310737ad2d3a16008": "2026-11-03"
+  },
+  "retries": {
+    "45399350f4cfb5a2fbde3e708ba8389896fe2ea7ebfa9b76dbd32090c674998d": 1,
+    "0b7c98fae0e8f34789b15e7af412461d58dabff0503e13fef5b9a61f461578cb": 1,
+    "f6cd414d117fe35822a591dcb5e305008dd30d5c88b8e74310737ad2d3a16008": 1
+  },
+  "batches": 1,
+  "last_batch_date": "2026-10-27",
   "force_next": false,
-  "last_skips": {}
+  "last_skips": {
+    "clean": 3,
+    "unreachable": 3
+  }
 }
