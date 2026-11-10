@@ -1,17 +1,17 @@
 {
-  "run_id": "f4b09850",
-  "mode": "batch",
-  "started_at": "2026-11-08T19:42:23.980727+00:00",
-  "status": "COMPLETED",
+  "run_id": "aa348ba4",
+  "mode": "discovery",
+  "started_at": "2026-11-09T23:43:50.729263+00:00",
+  "status": "FAILED",
   "metrics": {
-    "research_awaiting_confirm": true,
-    "research_batch": 0,
-    "all_leads": 548,
-    "all_leads_with_email": 276,
-    "all_leads_with_owner_phone": 7,
-    "all_leads_with_phone": 260,
-    "sheet_tabs_written": 2,
-    "sheet_tabs_failed": 0
+    "maps_provider": "SERPER_PLACES_SEARCH",
+    "candidates": 433,
+    "with_email": 0,
+    "needs_enrichment": 433,
+    "tiers": {
+      "WARM": 18
+    }
   },
-  "finished_at": "2026-11-08T19:42:49.418323+00:00"
+  "error": "read of tab Pipeline failed: Error: APIError: [429]: Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute' of service 'sheets.googleapis.com' for consumer 'project_number:511566560828'.. The availab",
+  "finished_at": "2026-11-10T00:03:17.423628+00:00"
 }
