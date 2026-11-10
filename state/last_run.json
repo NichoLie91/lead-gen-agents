@@ -1,9 +1,24 @@
 {
-  "run_id": "f474a6e1",
-  "mode": "batch",
-  "started_at": "2026-11-10T00:03:35.439948+00:00",
-  "status": "FAILED",
-  "metrics": {},
-  "error": "read of tab Pipeline failed: APIError: [429]: Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute' of service 'sheets.googleapis.com' for consumer 'project_number:511566560828'.",
-  "finished_at": "2026-11-10T00:04:19.508113+00:00"
+  "run_id": "18b3e13a",
+  "mode": "discovery",
+  "started_at": "2026-11-10T21:14:39.259669+00:00",
+  "status": "COMPLETED",
+  "metrics": {
+    "maps_provider": "SERPER_PLACES_SEARCH",
+    "candidates": 453,
+    "with_email": 0,
+    "needs_enrichment": 453,
+    "tiers": {
+      "WARM": 24
+    },
+    "pipeline_rows": 24,
+    "pipeline_pool": 267,
+    "all_leads": 548,
+    "all_leads_with_email": 276,
+    "all_leads_with_owner_phone": 7,
+    "all_leads_with_phone": 260,
+    "sheet_tabs_written": 5,
+    "sheet_tabs_failed": 0
+  },
+  "finished_at": "2026-11-10T21:33:30.512890+00:00"
 }
