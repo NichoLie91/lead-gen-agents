@@ -1,17 +1,9 @@
 {
-  "run_id": "aa348ba4",
-  "mode": "discovery",
-  "started_at": "2026-11-09T23:43:50.729263+00:00",
+  "run_id": "f474a6e1",
+  "mode": "batch",
+  "started_at": "2026-11-10T00:03:35.439948+00:00",
   "status": "FAILED",
-  "metrics": {
-    "maps_provider": "SERPER_PLACES_SEARCH",
-    "candidates": 433,
-    "with_email": 0,
-    "needs_enrichment": 433,
-    "tiers": {
-      "WARM": 18
-    }
-  },
-  "error": "read of tab Pipeline failed: Error: APIError: [429]: Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute' of service 'sheets.googleapis.com' for consumer 'project_number:511566560828'.. The availab",
-  "finished_at": "2026-11-10T00:03:17.423628+00:00"
+  "metrics": {},
+  "error": "read of tab Pipeline failed: APIError: [429]: Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute' of service 'sheets.googleapis.com' for consumer 'project_number:511566560828'.",
+  "finished_at": "2026-11-10T00:04:19.508113+00:00"
 }
