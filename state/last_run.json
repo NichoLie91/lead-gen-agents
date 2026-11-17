@@ -1,17 +1,24 @@
 {
-  "run_id": "330e7bb2",
-  "mode": "batch",
-  "started_at": "2026-11-17T00:04:33.320883+00:00",
+  "run_id": "68559a60",
+  "mode": "discovery",
+  "started_at": "2026-11-17T22:49:29.684436+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "research_awaiting_confirm": true,
-    "research_batch": 0,
+    "maps_provider": "SERPER_PLACES_SEARCH",
+    "candidates": 435,
+    "with_email": 0,
+    "needs_enrichment": 435,
+    "tiers": {
+      "WARM": 26
+    },
+    "pipeline_rows": 26,
+    "pipeline_pool": 274,
     "all_leads": 554,
     "all_leads_with_email": 276,
     "all_leads_with_owner_phone": 7,
     "all_leads_with_phone": 266,
-    "sheet_tabs_written": 2,
+    "sheet_tabs_written": 5,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-11-17T00:05:06.250288+00:00"
+  "finished_at": "2026-11-17T23:13:36.985136+00:00"
 }
