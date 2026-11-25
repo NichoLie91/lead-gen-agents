@@ -1,9 +1,17 @@
 {
-  "run_id": "7df84144",
-  "mode": "discovery",
-  "started_at": "2026-11-25T23:31:04.347713+00:00",
-  "status": "FAILED",
-  "metrics": {},
-  "error": "Discovery returned 0 leads from 912 queries (38 verticals x 24 metros). Provider state: SERPER_PLACES_SEARCH: HTTP 400: {\"message\":\"Not enough credits\",\"statusCode\":400}; GOOGLE_MAPS_TEXT_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu; SERPAPI_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit serpapi\",\"code\":1810,\"slug\":\"ActionExecu; ZENSERP_ZENSERP_GOOGLE_MAPS_SEARCH: {\"error\":{\"message\":\"No connected account found for user ID default for toolkit zenserp\",\"code\":1810,\"slug\":\"ActionExecu; GOOGLE_MAPS_NEARBY_SEARCH: {\"error\":{\"message\":\"Execution of toolkit 'GOOGLE_MAPS' is temporarily disabled by the administrator.\",\"code\":10403,\"slu",
-  "finished_at": "2026-11-25T23:31:10.678759+00:00"
+  "run_id": "59d6ccb5",
+  "mode": "batch",
+  "started_at": "2026-11-25T23:31:34.504015+00:00",
+  "status": "COMPLETED",
+  "metrics": {
+    "research_awaiting_confirm": true,
+    "research_batch": 0,
+    "all_leads": 564,
+    "all_leads_with_email": 276,
+    "all_leads_with_owner_phone": 7,
+    "all_leads_with_phone": 276,
+    "sheet_tabs_written": 2,
+    "sheet_tabs_failed": 0
+  },
+  "finished_at": "2026-11-25T23:32:30.680301+00:00"
 }
