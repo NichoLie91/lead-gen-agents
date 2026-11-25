@@ -1,17 +1,23 @@
 {
-  "run_id": "6e051d1a",
-  "mode": "batch",
-  "started_at": "2026-11-24T02:27:11.418113+00:00",
+  "run_id": "2f88cb7d",
+  "mode": "discovery",
+  "started_at": "2026-11-24T23:48:42.092347+00:00",
   "status": "COMPLETED",
   "metrics": {
-    "research_awaiting_confirm": true,
-    "research_batch": 0,
+    "candidates": 370,
+    "with_email": 0,
+    "needs_enrichment": 370,
+    "tiers": {
+      "WARM": 22
+    },
+    "pipeline_rows": 22,
+    "pipeline_pool": 284,
     "all_leads": 564,
     "all_leads_with_email": 276,
     "all_leads_with_owner_phone": 7,
     "all_leads_with_phone": 276,
-    "sheet_tabs_written": 2,
+    "sheet_tabs_written": 5,
     "sheet_tabs_failed": 0
   },
-  "finished_at": "2026-11-24T02:27:37.388194+00:00"
+  "finished_at": "2026-11-25T00:09:19.008144+00:00"
 }
